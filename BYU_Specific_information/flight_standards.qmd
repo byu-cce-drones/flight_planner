@@ -92,14 +92,10 @@ This can be done in the photo sorter if you know the sequence you did the flight
 
 ## Flight Planning
 
-::: {.callout-note}
-**TO DO: We need to figure out the best overlap for the correct number of images. If 1280 is the depth we are going for in the extractor, we need to limit the photos or we'll have to deal with large processing times.**
-::: 
-
 ### General Notes
 
-- Keep the flight photo count relatively low so that analysis doesn't take a long time. (The overlap will determine if enough pictures are being taken for the houses.)
-- DJI Fly controllers struggle with a lot of waypoints — 80+ waypoints cause some issues, and more than 99 really slows it down.
+- We want to keep the flight photo count relatively low so that analysis doesn't take a long time. (The overlap will determine if enough pictures are being taken for the houses.)
+- DJI Fly controllers struggle with a lot of waypoints — 80+ waypoints cause some issues, and more than 99 really slows it down. If a mission will have 80+ waypoints, consider splitting into two missions. 
 - Leave at least 30 seconds between flights. This ensures the photo sorter doesn't combine separate flights together. 
 
 ### Flight Paths {#sec-flight-paths}
@@ -109,6 +105,7 @@ In general:
 
 - We have two flights per road section, together called a flight set. One at ~70 feet and another at ~200 feet. The first is for the image analysis, the second is for the point cloud maker. 
 - The flight path should travel along the shoulder of the road, between the traveled way and parking strip/sidewalk. This reduces the likelihood of flying over a person, which Part 107 doesn't allow.
+- We will run most flight plans with the drone across the street, lookting at the houses. This allows the front of the house to be captured. 
 - Keep the paths reasonable and logical. One flight set should focus on a single road section, as seen in the naming examples. 
 Since more images means the point cloud maker takes longer, when in doubt, make it shorter. 
 - Do your best to avoid flying on private property. (We might want to make cards to give to people who question what we are doing. I've had a couple people inquire, and I've done a small number of flights compared to what we will do.)
@@ -151,21 +148,42 @@ We do not need to run flights covering these areas. We're concerned about buildi
 
 ### Heights and Angles {#sec-heights-and-angles}
 
-These are the heights and angles that have been found to work well for flight paths. 
-This list will update and expand as we fly missions. 
-We will need to verify these numbers in the field. 
+Flight sets are comprised of a 70-foot flight used to capture the front of houses and a 200-foot flight to create point clouds. 
+200 feet is a good height to collect the tops of houses to create the point clouds, with some slight gimbal adjustments. 
+70 feet is a good height to see the front of a house, but the pitch of the camera is determined by the distance to the house.
 
-| Height (ft) | Street Width | Drone Location | Angle (°) | Overlap |
+The following table outlines the pitch needed for each flight height and distance to the building. 
+
+| Street + Setback (ft)| Height (ft) | Angle (°) | Overlap |
 |---|---|---|---|---|
-| 70 | 30 - ? | Across Street | 40 | >75 |
-| 200 | 30 - ? | Across Street | 72 | >75 |
-| 70 | 60 - ? | Same Side | 35? | >75 |
-| 200 | 60 - ? | Same Side | 80? | >75 |
+| 30 | 70 | 63 | >75 |
+| 40 | 70 | 56 | >75 |
+| 50 | 70 | 50 | >75 |
+| 60 | 70 | 45 | >75 |
+| 70 | 70 | 40 | >75 |
+| 80 | 70 | 37 | >75 |
+| 90 | 70 | 34 | >75 |
+| 100 | 70 | 31 | >75 |
+|---|---|---|---|
+| 20 | 200 | 84 | >75 |
+| 30 | 200 | 82 | >75 |
+| 40 | 200 | 79 | >75 |
+| 50 | 200 | 76 | >75 |
+| 60 | 200 | 73 | >75 |
+| 70 | 200 | 70 | >75 |
+| 80 | 200 | 68 | >75 |
+| 90 | 200 | 66 | >75 |
+| 100 | 200 | 63 | >75 |
 
-*Is it better to use road type, or street width? A combination of both?
 
+
+ 
 ::: {.callout-note}
 Overlap values are still to be determined/verified for all flight profiles.
+
+70 foot gimbal pitches are based on the center of the picture being about 10 feet above the ground on the house front.
+
+200-foot gimbal pitches are based on the center of the picture being at the ground of the front of the house. 
 :::
 
 
@@ -264,3 +282,7 @@ The flight tracker is a companion app to the flight planner. It runs independent
 ### Box
 
 Here is a [link](https://byu.box.com/s/0tkvvoe2zg9b682r8vaxjwa2mwazyday) to the Box folder that we will use to organize all flight plans, taken photos, and annotated photos. If you should have access but don't, contact Connor Williams (willicon@byu.edu).
+
+::: {.callout-note}
+**TO DO: We need to figure out the best overlap for the correct number of images. If 1280 is the depth we are going for in the extractor, we need to limit the photos or we'll have to deal with large processing times. **
+::: 

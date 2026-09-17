@@ -21,3 +21,7 @@ missions/
 
 #User-specific Creator parameter presets
 .creator_presets.json
+
+
+# Until it is finished
+transfer_tool/

@@ -633,7 +633,7 @@ try:
             device_id = device_paths[0]
 
             client_info = _wpd_make_values()
-            client_info.SetStringValue(byref(WPD_CLIENT_NAME_KEY), "DJI Flight Planner")
+            client_info.SetStringValue(byref(WPD_CLIENT_NAME_KEY), "Flight Planner")
             client_info.SetUnsignedIntegerValue(byref(WPD_CLIENT_MAJOR_VERSION), 1)
             client_info.SetUnsignedIntegerValue(byref(WPD_CLIENT_MINOR_VERSION), 0)
             client_info.SetUnsignedIntegerValue(byref(WPD_CLIENT_REVISION), 0)
@@ -2217,6 +2217,23 @@ def extract_polygon_from_map_data(map_data):
             if len(coords) > 1 and coords[0] == coords[-1]:
                 coords = coords[:-1]
             if len(coords) >= 3:
+                return coords
+    return None
+
+def extract_line_from_map_data(map_data):
+    """
+    Pulls the most recently drawn line from an st_folium result as a list of
+    (lat, lon) vertices, or None if nothing linear has been drawn. Mirrors
+    extract_polygon_from_map_data - a polygon left over from mapping mode has
+    a nested-ring geometry this can't consume, hence checking the type.
+    """
+    if not map_data or not map_data.get("all_drawings"):
+        return None
+    for drawing in reversed(map_data["all_drawings"]):
+        geom = drawing.get("geometry", {})
+        if geom.get("type") == "LineString" and geom.get("coordinates"):
+            coords = [(c[1], c[0]) for c in geom["coordinates"]]
+            if len(coords) >= 2:
                 return coords
     return None
 
@@ -3908,7 +3925,7 @@ def _readme_dialog():
 with st.container(key="app_header"):
     header_title_col, header_tabs_col, header_readme_col = st.columns([1, 4, 0.6], gap="medium")
     with header_title_col:
-        st.markdown("# DJI Flight Planner")
+        st.markdown("# Flight Planner")
     with header_tabs_col:
         page = st.radio("Navigation", ["Creator", "Editor", "Viewer  |", "Photo Sorter", "DJI Fly Transfer"], horizontal=True, label_visibility="collapsed")
     with header_readme_col:
@@ -4268,7 +4285,64 @@ if page == 'Creator':
         if st.session_state.c_browsed_dir:
             notices.caption(f"📁 Saving to custom path: {st.session_state.c_browsed_dir}")
 
+    # --- Measure tool ---
+    # An independent point-to-point ruler for "how far is my drone from the
+    # house/target", deliberately NOT built on the flight-line draw tool -
+    # two tools listening to the same map clicks would risk a measurement
+    # click landing as a stray flight-line vertex. Mutual exclusion is
+    # enforced by construction rather than by detecting misuse after the
+    # fact: while measure_mode is on, no Draw control is added to the map at
+    # all (see the mapping_mode/else branches below), so there is nothing on
+    # the map that could start or continue a flight line. Toggling this
+    # necessarily remounts the map (it changes what's drawn onto `m`, same
+    # as everything else in map_sig below), which drops an unfinished,
+    # not-yet-completed flight line exactly like any other map_sig change
+    # already does elsewhere in this app - hence finishing (or not having
+    # started) a line before measuring, not just a suggestion.
+    if "measure_mode" not in st.session_state:
+        st.session_state.measure_mode = False
+    if "measure_points" not in st.session_state:
+        st.session_state.measure_points = []
+    if "measure_last_clicked" not in st.session_state:
+        st.session_state.measure_last_clicked = None
+    if "corridor_line" not in st.session_state:
+        # The finished point-to-point flight line, kept independent of the
+        # live Draw layer for the same reason map_boundary already is above -
+        # re-rendering the map (measure mode toggling included) wipes
+        # client-side drawings, so anything meant to survive that has to live
+        # here instead of being re-parsed from all_drawings on every render.
+        st.session_state.corridor_line = None
+
     top_hud = hud_half.container()
+    with hud_half:
+        measure_on = st.checkbox(
+            "📏 Measure distance", value=st.session_state.measure_mode, key="measure_toggle_cb",
+            help="Click two points on the map to measure the distance between them. "
+                 "Disables the drawing tools while active - finish or clear your flight "
+                 "line first.",
+        )
+        if measure_on != st.session_state.measure_mode:
+            st.session_state.measure_mode = measure_on
+            st.session_state.measure_points = []
+            st.session_state.measure_last_clicked = None
+            st.rerun()
+
+        if st.session_state.measure_mode:
+            n_pts = len(st.session_state.measure_points)
+            if n_pts == 0:
+                st.caption("Click a start point on the map.")
+            elif n_pts == 1:
+                st.caption("Click an end point on the map.")
+            else:
+                # The distance itself is labeled on the map, right on the
+                # measured line - see the midpoint marker below - so the HUD
+                # only needs the reset control, not the number too.
+                st.caption("Distance labeled on the line below.")
+                if st.button("Measure again", key="measure_clear_btn"):
+                    st.session_state.measure_points = []
+                    st.session_state.measure_last_clicked = None
+                    st.rerun()
+
     with map_layer:
         # --- Retained map view ---
         # st_folium hands the map's HTML to the component, and ANY change to
@@ -4297,6 +4371,9 @@ if page == 'Creator':
             (safe_get_float('map_alt_ft', 100.0), safe_get_float('map_pitch', -90.0),
              safe_get_float('map_front_ol', 75.0), safe_get_float('map_side_ol', 65.0),
              side, map_runout, map_bearing) if mapping_mode else None,
+            st.session_state.measure_mode,
+            tuple(st.session_state.measure_points),
+            tuple(tuple(p) for p in (st.session_state.corridor_line or ())),
         )
         if map_sig != st.session_state.get("creator_map_sig"):
             st.session_state.creator_map_sig = map_sig
@@ -4331,12 +4408,15 @@ if page == 'Creator':
 
         if mapping_mode:
             # Area-drawing tools only; the flight line is computed, not drawn.
-            Draw(export=False, draw_options={
-                'polyline': False,
-                'polygon': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
-                'rectangle': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
-                'circle': False, 'circlemarker': False, 'marker': False,
-            }).add_to(m)
+            # Omitted entirely in measure mode - see the note by measure_mode's
+            # definition on why "no draw tool present" is how that's enforced.
+            if not st.session_state.measure_mode:
+                Draw(export=False, draw_options={
+                    'polyline': False,
+                    'polygon': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
+                    'rectangle': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
+                    'circle': False, 'circlemarker': False, 'marker': False,
+                }).add_to(m)
 
             # Overlay the stored boundary and its computed serpentine path. The
             # boundary lives in our own session key (not just the Draw layer)
@@ -4364,20 +4444,79 @@ if page == 'Creator':
         else:
             # Polyline only - a corridor mission is a single flight line, so the
             # area/point tools are disabled to avoid drawing shapes this mode
-            # can't consume.
-            Draw(export=False, draw_options={
-                'polyline': {'shapeOptions': {'color': '#00ffff', 'weight': 5}},
-                'polygon': False, 'rectangle': False,
-                'circle': False, 'circlemarker': False, 'marker': False,
-            }).add_to(m)
+            # can't consume. Also omitted entirely in measure mode.
+            if not st.session_state.measure_mode:
+                Draw(export=False, draw_options={
+                    'polyline': {'shapeOptions': {'color': '#00ffff', 'weight': 5}},
+                    'polygon': False, 'rectangle': False,
+                    'circle': False, 'circlemarker': False, 'marker': False,
+                }).add_to(m)
+
+            # Once finished, the line lives in our own session key (not just
+            # the Draw layer) for the same reason map_boundary does above -
+            # re-rendering the map wipes client-side drawings, measure mode's
+            # remount included. Redrawn as a plain (non-editable) preview;
+            # "Clear flight line" below is how to get an editable one back,
+            # same tradeoff map_boundary already makes for polygons.
+            if st.session_state.corridor_line:
+                folium.PolyLine(
+                    st.session_state.corridor_line, color="#00ffff", weight=5,
+                    tooltip="Flight line",
+                ).add_to(m)
+
+        if st.session_state.measure_mode:
+            # Points are redrawn from session state each render rather than
+            # relying on anything client-side surviving - the same reason
+            # map_boundary's preview above is redrawn from state instead of
+            # trusting the Draw layer to still have it.
+            pts = st.session_state.measure_points
+            for i, p in enumerate(pts):
+                folium.Marker(
+                    p, tooltip=f"Point {i + 1}",
+                    icon=folium.Icon(color="orange", icon="record", prefix="fa"),
+                ).add_to(m)
+            if len(pts) == 2:
+                folium.PolyLine(pts, color="#ff8800", weight=3, dash_array="6 6").add_to(m)
+                # The distance reads right off the line itself - a metric up in
+                # the HUD was one more thing pushing that bar's height, for a
+                # number that means more sitting next to what it's measuring.
+                dist_ft = get_haversine_dist(pts[0], pts[1]) * M_TO_FT
+                midpoint = ((pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2)
+                folium.Marker(
+                    midpoint,
+                    icon=DivIcon(html=(
+                        '<div style="background:white; border:2px solid #ff8800; '
+                        'border-radius:4px; padding:3px 8px; font-size:13px; '
+                        'font-weight:600; color:#000; white-space:nowrap; '
+                        'transform:translate(-50%,-50%);">'
+                        f'{dist_ft:,.1f} ft</div>'
+                    )),
+                ).add_to(m)
 
         map_data = st_folium(m, use_container_width=True, height=1000, key="creator_map")
 
-        if mapping_mode:
+        if st.session_state.measure_mode:
+            clicked = map_data.get("last_clicked") if map_data else None
+            # last_clicked holds whatever was last clicked until something
+            # newer replaces it - comparing against the previous value is
+            # what turns that into a one-shot "a new click just happened"
+            # signal instead of re-appending the same click on every rerun
+            # this page happens to do for an unrelated reason.
+            if clicked and clicked != st.session_state.measure_last_clicked:
+                st.session_state.measure_last_clicked = clicked
+                if len(st.session_state.measure_points) < 2:
+                    st.session_state.measure_points.append((clicked["lat"], clicked["lng"]))
+                    st.rerun()
+        elif mapping_mode:
             detected_boundary = extract_polygon_from_map_data(map_data)
             if detected_boundary and detected_boundary != st.session_state.map_boundary:
                 st.session_state.map_boundary = detected_boundary
                 st.rerun()  # re-render immediately so the computed path overlay appears
+        else:
+            detected_line = extract_line_from_map_data(map_data)
+            if detected_line and detected_line != st.session_state.corridor_line:
+                st.session_state.corridor_line = detected_line
+                st.rerun()  # re-render immediately so the persisted-preview line appears
 
         if map_data and map_data.get("center"):
             st.session_state.creator_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
@@ -4527,13 +4666,11 @@ if page == 'Creator':
                     "straight line. Delete it with the bin icon and draw an area with width to it."
                 )
 
-    elif map_data.get("all_drawings") and any(
-        d.get('geometry', {}).get('type') == 'LineString' for d in map_data["all_drawings"]
-    ):
-        # Only consider drawn lines here - a polygon left over from mapping
-        # mode has a nested-ring geometry this corridor flow can't consume.
-        line_drawing = [d for d in map_data["all_drawings"] if d.get('geometry', {}).get('type') == 'LineString'][-1]
-        coords = [(c[1], c[0]) for c in line_drawing['geometry']['coordinates']]
+    elif st.session_state.corridor_line:
+        # Read from the persisted copy, not all_drawings directly - the Draw
+        # layer it comes from doesn't survive a remount (measure mode's
+        # included), but session state does. See corridor_line's own note.
+        coords = st.session_state.corridor_line
         total_dist_ft = sum(get_haversine_dist(coords[i], coords[i+1]) for i in range(len(coords)-1)) * M_TO_FT
 
         # Read the interval from session state, not the sidebar local: t_val_sec
@@ -4550,12 +4687,17 @@ if page == 'Creator':
             save_disabled = not render_99_override(notices, "cline", est_photos)
 
         with top_hud:
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1])
             c1.metric("Total Path Distance", f"{total_dist_ft:.1f} ft")
             c2.metric("Estimated Photos", f"{est_photos}" + (" / 99" if is_dji_fly else ""))
             with c3:
                 st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
                 save_clicked = st.button("Save & Generate KMZ", width='stretch', disabled=save_disabled)
+            with c4:
+                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+                if st.button("🗑 Clear flight line", width='stretch', key="btn_clear_corridor_line"):
+                    st.session_state.corridor_line = None
+                    st.rerun()
 
             if save_clicked:
                 with notices.spinner("Calculating terrain elevations and generating KMZ..."):
