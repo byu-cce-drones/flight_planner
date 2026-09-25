@@ -910,6 +910,10 @@ def add_basemap(fmap):
     ).add_to(fmap)
     return fmap
 
+# Creator's "📏 Measure distance" tool. Hidden from the UI for now; the code
+# is kept intact so flipping this back to True restores it unchanged.
+MEASURE_TOOL_ENABLED = False
+
 MISSION_DIR = "missions"
 SURFACES_DIR = "surfaces"
 FLIGHT_LOG_DIR = "flight_log"
@@ -4681,36 +4685,43 @@ if page == 'Creator':
         # client-side drawings, so anything meant to survive that has to live
         # here instead of being re-parsed from all_drawings on every render.
         st.session_state.corridor_line = None
+    if not MEASURE_TOOL_ENABLED:
+        # Also clears a measure mode left on from before the tool was hidden,
+        # which would otherwise keep the Draw control off the map with no
+        # checkbox left to turn it back on.
+        st.session_state.measure_mode = False
+        st.session_state.measure_points = []
 
     top_hud = hud_half.container()
     with hud_half:
-        measure_on = st.checkbox(
-            "📏 Measure distance", value=st.session_state.measure_mode, key="measure_toggle_cb",
-            help="Click two points on the map to measure the distance between them. "
-                 "Disables the drawing tools while active - finish or clear your flight "
-                 "line first.",
-        )
-        if measure_on != st.session_state.measure_mode:
-            st.session_state.measure_mode = measure_on
-            st.session_state.measure_points = []
-            st.session_state.measure_last_clicked = None
-            st.rerun()
+        if MEASURE_TOOL_ENABLED:
+            measure_on = st.checkbox(
+                "📏 Measure distance", value=st.session_state.measure_mode, key="measure_toggle_cb",
+                help="Click two points on the map to measure the distance between them. "
+                     "Disables the drawing tools while active - finish or clear your flight "
+                     "line first.",
+            )
+            if measure_on != st.session_state.measure_mode:
+                st.session_state.measure_mode = measure_on
+                st.session_state.measure_points = []
+                st.session_state.measure_last_clicked = None
+                st.rerun()
 
-        if st.session_state.measure_mode:
-            n_pts = len(st.session_state.measure_points)
-            if n_pts == 0:
-                st.caption("Click a start point on the map.")
-            elif n_pts == 1:
-                st.caption("Click an end point on the map.")
-            else:
-                # The distance itself is labeled on the map, right on the
-                # measured line - see the midpoint marker below - so the HUD
-                # only needs the reset control, not the number too.
-                st.caption("Distance labeled on the line below.")
-                if st.button("Measure again", key="measure_clear_btn"):
-                    st.session_state.measure_points = []
-                    st.session_state.measure_last_clicked = None
-                    st.rerun()
+            if st.session_state.measure_mode:
+                n_pts = len(st.session_state.measure_points)
+                if n_pts == 0:
+                    st.caption("Click a start point on the map.")
+                elif n_pts == 1:
+                    st.caption("Click an end point on the map.")
+                else:
+                    # The distance itself is labeled on the map, right on the
+                    # measured line - see the midpoint marker below - so the HUD
+                    # only needs the reset control, not the number too.
+                    st.caption("Distance labeled on the line below.")
+                    if st.button("Measure again", key="measure_clear_btn"):
+                        st.session_state.measure_points = []
+                        st.session_state.measure_last_clicked = None
+                        st.rerun()
 
     with map_layer:
         # --- Retained map view ---

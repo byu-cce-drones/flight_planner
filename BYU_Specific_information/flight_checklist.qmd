@@ -1,7 +1,5 @@
 ---
 title: "Pre-Flight Checklist"
-subtitle: "Field checklist for DJI Mini series (DJI Fly) flights"
-author: "Connor Williams"
 date-modified: 2026-09-11
 language:
   title-block-modified: "Last Updated"
@@ -14,6 +12,15 @@ format:
   pdf:
     toc: false
     number-sections: false
+    classoption: [DIV=14]
+    header-includes:
+      - \usepackage{titling}
+      - \pretitle{\begin{center}\normalsize\bfseries}
+      - \posttitle{\end{center}\vspace{-1.5em}}
+      - \usepackage[skins,breakable]{tcolorbox}
+      - \tcbset{top=1mm, bottom=1mm}
+      - \RedeclareSectionCommand[beforeskip=.6\baselineskip, afterskip=.2\baselineskip]{subsection}
+      - \RedeclareSectionCommand[beforeskip=.4\baselineskip, afterskip=.1\baselineskip]{subsubsection}
 ---
 
 For DJI Mini series drones (DJI Fly). Excerpted from the full [Flight Standards](https://cojow.github.io/flight_planner/BYU_Specific_information/flight_standards.html) document — see that page for the reasoning behind each item, naming conventions, and flight-planning guidance.

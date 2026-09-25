@@ -109,6 +109,35 @@
   #altSlider::-webkit-slider-thumb{ background:var(--house); box-shadow:0 0 0 1px var(--house); }
   #altSlider::-moz-range-thumb{ background:var(--house); box-shadow:0 0 0 1px var(--house); }
 
+  #pitchSlider::-webkit-slider-thumb{ background:var(--ink); box-shadow:0 0 0 1px var(--ink); }
+  #pitchSlider::-moz-range-thumb{ background:var(--ink); box-shadow:0 0 0 1px var(--ink); }
+  input[type="range"]:disabled{ opacity:.45; }
+  input[type="range"]:disabled::-webkit-slider-thumb{ cursor:default; }
+
+  .mode-row{ display:flex; align-items:center; gap:12px; }
+  .mode-row .mode-label{
+    font-family:"IBM Plex Mono", monospace; font-size:.74rem; letter-spacing:.08em;
+    color:var(--muted); text-transform:uppercase; white-space:nowrap; width:108px;
+  }
+  .seg{ display:inline-flex; border:1px solid var(--border); border-radius:5px; overflow:hidden; }
+  .seg button{
+    font-family:"IBM Plex Mono", monospace; font-size:.76rem; letter-spacing:.04em;
+    background:var(--surface-2); color:var(--muted); border:0; padding:6px 14px; cursor:pointer;
+  }
+  .seg button + button{ border-left:1px solid var(--border); }
+  .seg button[aria-pressed="true"]{ background:var(--accent); color:var(--surface); font-weight:600; }
+  .seg button:focus-visible{ outline:2px solid var(--line); outline-offset:-2px; }
+  .gauge-sub{ font-size:.74rem; color:var(--muted); margin-top:4px; line-height:1.4; }
+  .gauge-sub:empty{ display:none; }
+  .range-summary{
+    font-size:.82rem; line-height:1.5; margin-bottom:12px; padding:8px 12px;
+    background:var(--surface-2); border:1px solid var(--border); border-radius:5px;
+  }
+  .range-summary:empty{ display:none; }
+  .range-summary b{ color:var(--accent); }
+  .aim-ring{ fill:none; stroke:var(--line); stroke-width:2; }
+  tbody tr.out td{ opacity:.45; }
+
   .gauges{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
   .gauge{
     background:var(--surface-2); border:1px solid var(--border); border-radius:5px;
@@ -207,7 +236,9 @@
       straight-down-is-90&#176; convention: 90&#176; is nadir, 0&#176; is level with the horizon.
       Using the <b>DJI Mini 4 Pro's</b> vertical field of view, the diagram and table also show
       the <b>vertical range each shot actually captures</b> on the house's face &#8212; not just
-      where the frame is centered.
+      where the frame is centered. Switch <b>Pitch</b> to <b>Manual</b> to lock the gimbal at
+      one angle and see how the frame shifts as the run changes &#8212; useful for picking one
+      pitch that covers a whole range of street + setback distances.
     </p>
   </div>
 
@@ -263,6 +294,7 @@
         <path id="angleArc" class="tri-arc" d="" />
         <!-- points -->
         <circle id="droneDot" class="drone-dot" cx="110" cy="44" r="4" />
+        <circle id="aimRing" class="aim-ring" cx="366" cy="268" r="6" style="display:none" />
         <circle id="targetDot" class="target-dot" cx="366" cy="268" r="5" />
         <!-- labels -->
         <text id="altLabel" class="tri-label" x="86" y="156" text-anchor="middle" transform="rotate(-90 86 156)">ALT 70&#8242;</text>
@@ -275,6 +307,13 @@
       </svg>
 
       <div class="controls">
+        <div class="mode-row">
+          <span class="mode-label" id="modeLabel">Pitch</span>
+          <div class="seg" role="group" aria-labelledby="modeLabel">
+            <button type="button" id="modeAuto" aria-pressed="true">Auto (aim at target)</button>
+            <button type="button" id="modeManual" aria-pressed="false">Manual</button>
+          </div>
+        </div>
         <div class="slider-row">
           <label for="altSlider">Altitude (ft)</label>
           <input type="range" id="altSlider" min="20" max="300" step="5" value="70" />
@@ -286,6 +325,10 @@
         <div class="slider-row">
           <label for="heightSlider">Target ht (ft)</label>
           <input type="range" id="heightSlider" min="0" max="30" step="1" value="15" />
+        </div>
+        <div class="slider-row">
+          <label for="pitchSlider">Gimbal pitch (&#176;)</label>
+          <input type="range" id="pitchSlider" min="0" max="90" step="0.5" value="45" disabled />
         </div>
         <div class="gauges">
           <div class="gauge">
@@ -301,7 +344,7 @@
             <div class="gauge-value" id="gaugeHeight">15.0 ft</div>
           </div>
           <div class="gauge">
-            <div class="gauge-label">Distance to target</div>
+            <div class="gauge-label" id="gaugeHypLabel">Distance to target</div>
             <div class="gauge-value" id="gaugeHyp">78.5 ft</div>
           </div>
           <div class="gauge">
@@ -309,8 +352,9 @@
             <div class="gauge-value" id="gaugeAngle">44.9&#176;</div>
           </div>
           <div class="gauge hero">
-            <div class="gauge-label">Gimbal pitch (90&#176; = straight down)</div>
+            <div class="gauge-label" id="gaugePitchLabel">Gimbal pitch (90&#176; = straight down)</div>
             <div class="gauge-value" id="gaugePitch">45.1&#176;</div>
+            <div class="gauge-sub" id="pitchSub"></div>
           </div>
         </div>
         <div class="gauges-sub">
@@ -335,12 +379,13 @@
   <section>
     <div class="section-head">
       <span class="section-title">Full sweep</span>
-      <span class="section-note">click a row to set Run &#183; drag Target ht above to recompute all rows</span>
+      <span class="section-note" id="tableNote">click a row to set Run &#183; drag Target ht above to recompute all rows</span>
     </div>
+    <div class="range-summary" id="rangeSummary"></div>
     <div class="table-scroll">
       <table>
         <thead>
-          <tr><th>Run (ft)</th><th>Dist (ft)</th><th>Top angle</th><th>Gimbal pitch</th><th>Frame bottom</th><th>Frame top</th></tr>
+          <tr id="tableHead"></tr>
         </thead>
         <tbody id="tableBody"></tbody>
       </table>
@@ -401,6 +446,21 @@
         <span class="eq-desc">
           Each ray's own height on the house, using the same drop &#8594; height relationship as
           the center point &#8212; just solved at the frame's edges instead of its middle.
+        </span>
+      </div>
+      <div class="eq">
+        <span class="eq-formula">center ht = alt &#8722; run &#183; tan(pitch)</span>
+        <span class="eq-desc">
+          <b>Manual mode:</b> where the middle of the frame lands on the house for a fixed pitch.
+          The frame edges use the same formula above with &#952; = 90&#176; &#8722; pitch.
+        </span>
+      </div>
+      <div class="eq">
+        <span class="eq-formula">target pos = 50% + 50% &#183; tan(&#952;<sub>target</sub> &#8722; &#952;) &#247; tan(halfFOV)</span>
+        <span class="eq-desc">
+          <b>Manual mode:</b> where the target height sits in the photo, 0% at the bottom edge and
+          100% at the top (pinhole projection). 50% means it's dead center; outside 0&ndash;100%
+          means it's out of the shot.
         </span>
       </div>
     </div>
@@ -482,19 +542,51 @@
     return { height: alt - drop, valid: true };
   }
 
-  function compute(run, height, alt){
-    const drop = alt - height;
-    const dist = Math.hypot(drop, run);
-    const angleDeg = Math.atan(run / drop) * 180 / Math.PI;
-    const pitchDeg = 90 - angleDeg;
+  const pitchSlider = document.getElementById("pitchSlider");
+  const modeAuto = document.getElementById("modeAuto");
+  const modeManual = document.getElementById("modeManual");
+  const aimRing = document.getElementById("aimRing");
+  const gaugeHypLabel = document.getElementById("gaugeHypLabel");
+  const gaugePitchLabel = document.getElementById("gaugePitchLabel");
+  const pitchSub = document.getElementById("pitchSub");
+  const tableHead = document.getElementById("tableHead");
+  const tableNote = document.getElementById("tableNote");
+  const rangeSummary = document.getElementById("rangeSummary");
+  const EN_DASH = String.fromCharCode(8211), MIDDOT = String.fromCharCode(183);
+  const RUN_MIN = 5, RUN_MAX = 100;
+  // "Well framed" = target lands in the middle half of the photo's height.
+  const GOOD_LO = 25, GOOD_HI = 75;
+  let mode = "auto";
 
-    // top-of-frame ray sits farther from straight-down (shallower pitch);
-    // bottom-of-frame ray sits closer to straight-down (steeper pitch).
+  // Everything about one shot, given the center ray's angle from straight
+  // down. Auto mode derives angleDeg from the target; manual mode derives it
+  // from the pitch slider - past this point the two are handled identically.
+  function frameAt(run, angleDeg, alt, height){
+    // The center ray is special-cased at straight down: rayHeight() would
+    // call it "behind", but a nadir center ray just lands under the drone.
+    const center = angleDeg <= 0
+      ? { height: null, valid: false, reason: "ground", groundHitRun: 0 }
+      : rayHeight(run, angleDeg, alt);
     const top = rayHeight(run, angleDeg + HALF_FOV_DEG, alt);
     const bottom = rayHeight(run, angleDeg - HALF_FOV_DEG, alt);
     const frameSpan = (top.valid && bottom.valid) ? (top.height - bottom.height) : null;
 
-    return { drop, dist, angleDeg, pitchDeg, frameTop: top, frameBottom: bottom, frameSpan };
+    let dist = null;
+    if (center.valid) dist = Math.hypot(run, alt - center.height);
+    else if (center.reason === "ground") dist = Math.hypot(center.groundHitRun, alt);
+
+    // Where the target height lands in the photo: 0% bottom edge, 100% top.
+    const targetDeg = Math.atan(run / (alt - height)) * 180 / Math.PI;
+    const toRad = Math.PI / 180;
+    const targetPos = 50 + 50 * Math.tan((targetDeg - angleDeg) * toRad) / Math.tan(HALF_FOV_DEG * toRad);
+
+    return { angleDeg, pitchDeg: 90 - angleDeg, center, dist, frameTop: top, frameBottom: bottom,
+             frameSpan, targetDeg, idealPitch: 90 - targetDeg, targetPos };
+  }
+
+  function angleFor(run, height, alt){
+    if (mode === "manual") return 90 - Number(pitchSlider.value);
+    return Math.atan(run / (alt - height)) * 180 / Math.PI;
   }
 
   const REASON_LABEL = { sky: "sky", behind: "behind drone", ground: "hits ground first" };
@@ -506,21 +598,61 @@
   function fmtHeight(edge){
     return edge.valid ? `${edge.height.toFixed(1)} ft` : REASON_LABEL[edge.reason];
   }
+  function fmtPos(pos){
+    if (pos < 0) return "below frame";
+    if (pos > 100) return "above frame";
+    return `${pos.toFixed(0)}%`;
+  }
+
+  const HEADERS = {
+    auto: ["Run (ft)", "Dist (ft)", "Top angle", "Gimbal pitch", "Frame bottom", "Frame top"],
+    manual: ["Run (ft)", "Ideal pitch", "Center ht", "Target pos", "Frame bottom", "Frame top"],
+  };
+  const NOTES = {
+    auto: `click a row to set Run ${MIDDOT} drag Target ht above to recompute all rows`,
+    manual: `every row uses the same manual pitch ${MIDDOT} dimmed rows lose the target`,
+  };
 
   function buildTable(){
     tableBody.innerHTML = "";
     RUN_VALUES.forEach(run => {
       const tr = document.createElement("tr");
       tr.dataset.run = run;
-      tr.innerHTML = `<td>${run}</td><td class="cell-dist"></td><td class="cell-angle"></td>` +
-        `<td class="cell-pitch"></td><td class="cell-fbottom"></td><td class="cell-ftop"></td>`;
+      tr.innerHTML = `<td>${run}</td><td class="c1"></td><td class="c2"></td>` +
+        `<td class="c3"></td><td class="c4"></td><td class="c5"></td>`;
       tr.addEventListener("click", () => { runSlider.value = run; update(); });
       tableBody.appendChild(tr);
     });
   }
 
+  function setMode(next){
+    mode = next;
+    modeAuto.setAttribute("aria-pressed", String(mode === "auto"));
+    modeManual.setAttribute("aria-pressed", String(mode === "manual"));
+    pitchSlider.disabled = mode !== "manual";
+    tableHead.innerHTML = HEADERS[mode].map(h => `<th>${h}</th>`).join("");
+    tableNote.textContent = NOTES[mode];
+    update();
+  }
+
+  // Runs (1-ft steps) where a fixed pitch keeps the target inside [lo, hi]%
+  // of the frame. Target position falls steadily as run grows, so the hits
+  // always form one contiguous range.
+  function runRange(alt, height, lo, hi){
+    let first = null, last = null;
+    for (let r = RUN_MIN; r <= RUN_MAX; r++){
+      const pos = frameAt(r, angleFor(r, height, alt), alt, height).targetPos;
+      if (pos >= lo && pos <= hi){ if (first === null) first = r; last = r; }
+    }
+    return first === null ? null : [first, last];
+  }
+  function fmtRange(range){
+    return range ? `<b>${range[0]}${EN_DASH}${range[1]} ft</b>` : "<b>none</b>";
+  }
+
   function update(){
     const alt = Number(altSlider.value);
+    const manual = mode === "manual";
 
     // Target height can never reach the drone's own altitude (drop must stay
     // positive), and separately should never exceed the house-height
@@ -534,7 +666,11 @@
     const run = Number(runSlider.value);
     const height = Number(heightSlider.value);
     const houseMax = Number(heightSlider.max);
-    const { drop, dist, angleDeg, pitchDeg, frameTop, frameBottom, frameSpan } = compute(run, height, alt);
+    const shot = frameAt(run, angleFor(run, height, alt), alt, height);
+    const { angleDeg, pitchDeg, center, dist, frameTop, frameBottom, frameSpan } = shot;
+    // In auto mode the pitch slider just mirrors the computed pitch, so
+    // switching to manual starts from the aimed shot rather than a jump.
+    if (!manual) pitchSlider.value = pitchDeg;
 
     // Auto-fit: choose whichever of the vertical (altitude) or horizontal
     // (run) axis is more restrictive for the CURRENT values, so the drone
@@ -582,23 +718,9 @@
 
     tick.setAttribute("d", `M ${Lx} ${targetY - 10} L ${Lx + 10} ${targetY - 10} L ${Lx + 10} ${targetY}`);
 
-    sightLine.setAttribute("x2", rightX);
-    sightLine.setAttribute("y2", targetY);
-
-    targetDot.setAttribute("cx", rightX);
-    targetDot.setAttribute("cy", targetY);
-
-    // angle arc at the drone vertex, between straight-down and the sight line
-    const R = 26;
-    const ax = Lx, ay = topY + R;
-    const angleRad = angleDeg * Math.PI / 180;
-    const bx = Lx + R * Math.sin(angleRad);
-    const by = topY + R * Math.cos(angleRad);
-    angleArc.setAttribute("d", `M ${ax} ${ay} A ${R} ${R} 0 0 1 ${bx} ${by}`);
-
-    // FOV cone rays - drawn exactly to the wall when the edge is valid;
-    // otherwise drawn as a fixed-length ray in the correct direction only,
-    // since it doesn't land on this wall in the simple single-plane sense.
+    // FOV rays - drawn exactly to the wall when the ray is valid; otherwise
+    // drawn as a fixed-length ray in the correct direction only, since it
+    // doesn't land on this wall in the simple single-plane sense.
     const RAY_LEN = 260;
     function rayEndpoint(edgeDeg, edge){
       if (edge.valid){
@@ -612,6 +734,28 @@
       const rad = edgeDeg * Math.PI / 180;
       return { x: Lx + RAY_LEN * Math.sin(rad), y: topY + RAY_LEN * Math.cos(rad) };
     }
+
+    // sight line: to the target in auto mode, to wherever the frame's center
+    // actually lands in manual mode (which may be the ground, not the house).
+    const centerEnd = rayEndpoint(angleDeg, center);
+    sightLine.setAttribute("x2", centerEnd.x);
+    sightLine.setAttribute("y2", centerEnd.y);
+    targetDot.setAttribute("cx", centerEnd.x);
+    targetDot.setAttribute("cy", centerEnd.y);
+    // manual mode keeps the target visible as a ring so the offset between
+    // where you're aiming and where you wanted to aim is obvious.
+    aimRing.style.display = manual ? "" : "none";
+    aimRing.setAttribute("cx", rightX);
+    aimRing.setAttribute("cy", targetY);
+
+    // angle arc at the drone vertex, between straight-down and the sight line
+    const R = 26;
+    const ax = Lx, ay = topY + R;
+    const angleRad = angleDeg * Math.PI / 180;
+    const bx = Lx + R * Math.sin(angleRad);
+    const by = topY + R * Math.cos(angleRad);
+    angleArc.setAttribute("d", `M ${ax} ${ay} A ${R} ${R} 0 0 1 ${bx} ${by}`);
+
     const topEdgeDeg = angleDeg + HALF_FOV_DEG, bottomEdgeDeg = angleDeg - HALF_FOV_DEG;
     const topEnd = rayEndpoint(topEdgeDeg, frameTop);
     const bottomEnd = rayEndpoint(bottomEdgeDeg, frameBottom);
@@ -620,26 +764,34 @@
 
     // shaded band: the vertical range actually captured on the house face.
     // An off-frame edge runs the band to the canvas edge in that direction
-    // instead of a fabricated point on the wall.
+    // instead of a fabricated point on the wall. If the whole frame misses
+    // the wall (both edges hit the ground first), there's no band at all.
     const bandTopY = frameTop.valid ? (By - frameTop.height * SCALE) : 4;
     const bandBottomY = frameBottom.valid ? (By - frameBottom.height * SCALE) : By + 4;
+    const missesWall = !frameTop.valid && frameTop.reason === "ground";
     frameBand.setAttribute("x", rightX - houseHalf);
     frameBand.setAttribute("y", Math.min(bandTopY, bandBottomY));
     frameBand.setAttribute("width", houseHalf * 2);
-    frameBand.setAttribute("height", Math.max(2, Math.abs(bandBottomY - bandTopY)));
+    frameBand.setAttribute("height", missesWall ? 0 : Math.max(2, Math.abs(bandBottomY - bandTopY)));
 
     // labels
     runLabel.setAttribute("x", (Lx + rightX) / 2);
     runLabel.textContent = `RUN ${run.toFixed(1)}${PRIME}`;
 
-    const midX = (Lx + rightX) / 2, midY = (topY + targetY) / 2;
+    const midX = (Lx + centerEnd.x) / 2, midY = (topY + centerEnd.y) / 2;
     distLabel.setAttribute("x", midX - 20);
     distLabel.setAttribute("y", midY - 8);
-    distLabel.textContent = `DIST ${dist.toFixed(1)}${PRIME}`;
+    distLabel.textContent = dist !== null ? `DIST ${dist.toFixed(1)}${PRIME}` : "";
 
-    htLabel.setAttribute("x", rightX);
-    htLabel.setAttribute("y", targetY - 12);
-    htLabel.textContent = `HT ${height.toFixed(1)}${PRIME}`;
+    if (manual){
+      htLabel.setAttribute("x", centerEnd.x);
+      htLabel.setAttribute("y", centerEnd.y - 12);
+      htLabel.textContent = center.valid ? `CTR ${center.height.toFixed(1)}${PRIME}` : `CTR ${REASON_LABEL[center.reason]}`;
+    } else {
+      htLabel.setAttribute("x", rightX);
+      htLabel.setAttribute("y", targetY - 12);
+      htLabel.textContent = `HT ${height.toFixed(1)}${PRIME}`;
+    }
 
     const labelR = R + 22;
     angleLabel.setAttribute("x", Lx + labelR * Math.sin(angleRad / 2) + 6);
@@ -653,33 +805,56 @@
 
     gaugeRun.textContent = `${run.toFixed(1)} ft`;
     gaugeHeight.textContent = `${height.toFixed(1)} ft`;
-    gaugeHyp.textContent = `${dist.toFixed(1)} ft`;
+    gaugeHypLabel.textContent = manual ? "Distance to frame center" : "Distance to target";
+    gaugeHyp.textContent = dist !== null ? `${dist.toFixed(1)} ft` : EM_DASH;
     gaugeAngle.textContent = `${angleDeg.toFixed(1)}${DEGREE}`;
+    gaugePitchLabel.textContent = manual
+      ? `Gimbal pitch ${EM_DASH} manual (90${DEGREE} = straight down)`
+      : `Gimbal pitch (90${DEGREE} = straight down)`;
     gaugePitch.textContent = `${pitchDeg.toFixed(1)}${DEGREE}`;
+    pitchSub.textContent = manual
+      ? `Auto would use ${shot.idealPitch.toFixed(1)}${DEGREE} ${MIDDOT} target sits at ${fmtPos(shot.targetPos)} of frame height ${MIDDOT} center of frame at ${fmtHeight(center)}`
+      : "";
     gaugeFrameTop.textContent = fmtHeight(frameTop);
     gaugeFrameBottom.textContent = fmtHeight(frameBottom);
     gaugeFrameSpan.textContent = frameSpan !== null ? `${frameSpan.toFixed(1)} ft` : EM_DASH;
 
+    const warnings = [];
+    if (manual && (shot.targetPos < 0 || shot.targetPos > 100)){
+      warnings.push(`Target height (${height.toFixed(0)} ft) is ${fmtPos(shot.targetPos)} at this pitch ${EM_DASH} it isn't in the shot.`);
+    }
     if (!frameTop.valid){
-      frameWarning.textContent = `Top of frame ${REASON_EXPLAIN[frameTop.reason]} at this run/height/pitch ${EM_DASH} part of the shot is sky or foreground, not the house.`;
-      frameWarning.classList.add("show");
+      warnings.push(`Top of frame ${REASON_EXPLAIN[frameTop.reason]} at this run/height/pitch ${EM_DASH} part of the shot is sky or foreground, not the house.`);
     } else if (!frameBottom.valid){
-      frameWarning.textContent = `Bottom of frame ${REASON_EXPLAIN[frameBottom.reason]} at this run/height/pitch ${EM_DASH} part of the shot is ground in front of the house, not the wall.`;
-      frameWarning.classList.add("show");
+      warnings.push(`Bottom of frame ${REASON_EXPLAIN[frameBottom.reason]} at this run/height/pitch ${EM_DASH} part of the shot is ground in front of the house, not the wall.`);
+    }
+    frameWarning.textContent = warnings.join(" ");
+    frameWarning.classList.toggle("show", warnings.length > 0);
+
+    if (manual){
+      const good = runRange(alt, height, GOOD_LO, GOOD_HI);
+      const any = runRange(alt, height, 0, 100);
+      rangeSummary.innerHTML =
+        `At <b>${pitchDeg.toFixed(1)}${DEGREE}</b> and ${alt.toFixed(0)} ft, the ${height.toFixed(0)} ft target stays in the ` +
+        `middle half of the frame for runs of ${fmtRange(good)}, and somewhere in the frame for ${fmtRange(any)}.`;
     } else {
-      frameWarning.classList.remove("show");
+      rangeSummary.innerHTML = "";
     }
 
-    // recompute every row for the current target height
+    // recompute every row for the current target height (and manual pitch)
     tableBody.querySelectorAll("tr").forEach(tr => {
       const r = Number(tr.dataset.run);
-      const rowCalc = compute(r, height, alt);
-      tr.querySelector(".cell-dist").textContent = rowCalc.dist.toFixed(1);
-      tr.querySelector(".cell-angle").textContent = `${rowCalc.angleDeg.toFixed(1)}${DEGREE}`;
-      tr.querySelector(".cell-pitch").textContent = `${rowCalc.pitchDeg.toFixed(1)}${DEGREE}`;
-      tr.querySelector(".cell-fbottom").textContent = fmtHeight(rowCalc.frameBottom);
-      tr.querySelector(".cell-ftop").textContent = fmtHeight(rowCalc.frameTop);
+      const row = frameAt(r, angleFor(r, height, alt), alt, height);
+      const cells = manual
+        ? [`${row.idealPitch.toFixed(1)}${DEGREE}`, fmtHeight(row.center), fmtPos(row.targetPos)]
+        : [row.dist.toFixed(1), `${row.angleDeg.toFixed(1)}${DEGREE}`, `${row.pitchDeg.toFixed(1)}${DEGREE}`];
+      tr.querySelector(".c1").textContent = cells[0];
+      tr.querySelector(".c2").textContent = cells[1];
+      tr.querySelector(".c3").textContent = cells[2];
+      tr.querySelector(".c4").textContent = fmtHeight(row.frameBottom);
+      tr.querySelector(".c5").textContent = fmtHeight(row.frameTop);
       tr.classList.toggle("active", r === run);
+      tr.classList.toggle("out", manual && (row.targetPos < 0 || row.targetPos > 100));
     });
   }
 
@@ -687,5 +862,8 @@
   altSlider.addEventListener("input", update);
   runSlider.addEventListener("input", update);
   heightSlider.addEventListener("input", update);
-  update();
+  pitchSlider.addEventListener("input", update);
+  modeAuto.addEventListener("click", () => setMode("auto"));
+  modeManual.addEventListener("click", () => setMode("manual"));
+  setMode("auto");
 </script>
