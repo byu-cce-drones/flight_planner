@@ -367,6 +367,27 @@ These will retain the same name as the folder with the prefix "**photo**" replac
 For now they will also contain atleast the point cloud, as well as the individual houses. 
 The folders will retain the same name as the photo folder with the prefix "**photo**" replaced with "**cloud**".
 
+## Statistical Methods and Questions {#stats}
+
+We are going to use Random Sampling to fly sections of the city. 
+Then we will scale it up from there to get an estimate of the entire city. 
+This section will update as we look into the literature and find the best way to do this. 
+
+
+
+- Research Questions
+  - How are drones currently used in Transportation? 
+  - How are they used in collecting socioeconomic data? 
+  - Socioeconomic data in Transportation modeling.
+  - How similar to people who live next to each other in terms of income, etc?
+  - How will we sample cities and scale them up? (See the paragraph above)
+
+
+- Other questions that we need to answer
+  - What American Census variables can we collect using a Drone? 
+  Are there variables that we can't direclty get, then to find correlations? 
+
+
 ## TODO {#sec-todo}
 
 **Flight Planning**
