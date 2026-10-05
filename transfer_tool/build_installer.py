@@ -43,6 +43,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "DJI Fly Mission Transfer"
@@ -159,22 +160,49 @@ def build():
             pass
 
     print(f"\nbuilding {APP_NAME} for {platform.system()}...\n")
+    # Anything in dist/ older than this came from a previous build - see the
+    # listing below, which refuses to present those as this build's output.
+    started_at = time.time()
     import PyInstaller.__main__
     PyInstaller.__main__.run(args)
 
     dist = os.path.join(HERE, "dist")
+
+    # The zip is made here rather than left as a command to copy-paste. When
+    # it was a printed instruction, the listing below still found last build's
+    # zip sitting in dist/ and reported it under "built:" - so a stale app
+    # looked freshly built, and got shipped. Build it, or say it isn't there.
+    if platform.system() == "Darwin":
+        zip_name = f"{APP_NAME}.zip"
+        zip_path = os.path.join(dist, zip_name)
+        # Rebuilt from scratch: zip ADDS to an existing archive rather than
+        # replacing it, which would leave the previous build's files inside.
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        # The system zip, not shutil.make_archive, because a .app is full of
+        # symlinks and executable bits that make_archive does not preserve -
+        # an archive that unpacks into an app that won't launch.
+        print(f"\nzipping {APP_NAME}.app (a bare .app loses its executable bit in transit)...")
+        zipped = subprocess.run(["zip", "-qry", zip_name, f"{APP_NAME}.app"], cwd=dist)
+        if zipped.returncode != 0:
+            print(f"  WARNING: zip failed ({zipped.returncode}) - zip the .app yourself before handing it out")
+
     print("\nbuilt:")
+    # Only what this run actually produced. Anything else in dist/ is left
+    # over from an earlier build and is called out separately rather than
+    # being listed as if it were new.
+    fresh, stale = [], []
     for entry in sorted(os.listdir(dist)):
         path = os.path.join(dist, entry)
         size = _tree_size(path) / (1024 * 1024)
-        print(f"  {entry}  ({size:.1f} MB)")
-
-    if platform.system() == "Darwin":
-        print(
-            "\nHand out the .app, zipped - a bare .app sent as a folder loses the\n"
-            "executable bit on the way through most chat/mail clients:\n"
-            f'    cd "{dist}" && zip -qry "{APP_NAME}.zip" "{APP_NAME}.app"'
-        )
+        line = f"  {entry}  ({size:.1f} MB)"
+        (fresh if os.path.getmtime(path) >= started_at else stale).append(line)
+    for line in fresh:
+        print(line)
+    if stale:
+        print("\nalso in dist/, left over from an earlier build - do not hand these out:")
+        for line in stale:
+            print(line)
     print(
         "\nThis build is unsigned - see this script's notes. First launch on another "
         "Mac needs right-click -> Open; Windows needs 'More info -> Run anyway'."

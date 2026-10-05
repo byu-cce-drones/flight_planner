@@ -108,8 +108,8 @@ version you intend to support.
 Output differs by platform, deliberately:
 
 - **Windows** gets a single `.exe` - the friendliest thing to hand someone.
-- **macOS** gets a `.app` bundle, which must be **zipped** before handing out
-  (the build prints the exact command). A `.app` is a directory, so sending
+- **macOS** gets a `.app` bundle, which the build then **zips for you** - hand
+  out the `.zip`, never the bare `.app`. A `.app` is a directory, so sending
   it as a bare folder loses the executable bit through most chat and mail
   clients and the app then won't open. Onefile mode is deliberately not used
   on macOS: it unpacks itself to a temp directory on every launch, which is
