@@ -1,7 +1,9 @@
 # Flight_planner
 An open-source flight planning software for DJI drones. 
 Plans can be made for both DJI Pilot 2 (Enterprise) and DJI Fly (Commercial) apps.
-Works on both Windows and Mac OS. [Link to github.](https://github.com/cojow/flight_planner)
+Works on both Windows and Mac OS. [Link to github.](https://github.com/byu-cce-drones/flight_planner)
+
+[Link](https://cce-byu-flight-planner.streamlit.app/) to hosted website.
 
 ## Tabs
 The app is split into 5 tabs. Click a tab to jump to its section below.
@@ -10,8 +12,6 @@ The app is split into 5 tabs. Click a tab to jump to its section below.
 * [Viewer](#the-viewer)
 * [Photo Sorter](#photo-sorter)
 * [DJI Fly Transfer](#dji-fly-transfer)
-
-Link to the related BYU [research pages](https://cojow.github.io/flight_planner/BYU_Specific_information/).
 
 ## Running the Planner Steps
 1. Download this repository.
