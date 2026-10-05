@@ -24,10 +24,7 @@ pip install -r path/to/requirements.txt
 > **Note**: Update path/to/requirements.txt
 > with the relative path to the folder.
 
-> **Note**: On Mac/Linux, the DJI Fly Transfer tab also needs `libmtp` installed as a system library (not a pip package) — `brew install libmtp` on Mac. 
-> Without it, that tab's controller detection silently disables itself with no in-app error. 
-> Windows doesn't need this; `comtypes` (already in requirements.txt) covers it there.
-
+> **Note**: the planner itself never talks to a controller on this fork - the desktop app downloaded from the DJI Fly Transfer tab does that, and it carries its own USB support.
 3. Launch the app by running the following in the terminal. 
 The app will open in your web browser using a local host.
 ```
@@ -47,7 +44,7 @@ FLIGHT_PLANNER_MULTI_USER=1
 ```
 On Streamlit Community Cloud this goes in the app's Settings &rarr; Secrets panel (as `FLIGHT_PLANNER_MULTI_USER = "1"`); anywhere else, set it as a normal environment variable before `streamlit run`. Off by default, so a plain local install is completely unaffected.
 
-With it on, each browser tab gets its own subfolder under `missions/_sessions/`, invisible to every other visitor, and disappears once that tab's session ends. The OS-native folder-browse buttons ("📂") also don't work in this kind of container (there's no desktop to show a folder picker on) - visitors should leave Save Destination on *Root (missions/)* and rely on the download button instead. The DJI Fly Transfer tab needs a USB-connected controller physically plugged into whatever machine is running the app, so it isn't usable in this setup either; that's expected, not a bug, and it fails with a clear message rather than crashing.
+With it on, each browser tab gets its own subfolder under `missions/_sessions/`, invisible to every other visitor, and disappears once that tab's session ends. The OS-native folder-browse buttons ("📂") also don't work in this kind of container (there's no desktop to show a folder picker on) - visitors should leave Save Destination on *Root (missions/)* and rely on the download button instead. The DJI Fly Transfer tab works fine in this setup: it hands out the desktop transfer app rather than touching USB itself.
 
 
 ## Using the Flight Planner
@@ -58,7 +55,7 @@ The *Photo Sorter* and *DJI Fly Transfer* are tabs designed specifically for get
 
 ### **The Creator**
 
-<img src="BYU_Specific_information/images/creator_overview.png" alt="" width="100%">
+<img src="images/creator_overview.png" alt="" width="100%">
 
 #### Selecting a Location
 Once the app is running, the map will be centered at BYU in Provo, Utah. 
@@ -97,7 +94,7 @@ It is limited to 99 photos per flight plan due to each photo having to be a wayp
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/hardware_and_payload_settings.png" alt="">
+<img src="images/hardware_and_payload_settings.png" alt="">
 
 </td>
 </tr>
@@ -119,7 +116,7 @@ Presets are saved to your computer and will still be there the next time you ope
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/global_config_settings.png" alt="">
+<img src="images/global_config_settings.png" alt="">
 
 </td>
 </tr>
@@ -145,7 +142,7 @@ This is very important if your flight plan is not over a flat surface.
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/waypoint_setting.png" alt="">
+<img src="images/waypoint_setting.png" alt="">
 
 </td>
 </tr>
@@ -189,9 +186,9 @@ It does trade some extra turning for the saved photos, so on a few shapes the to
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/trigger_and_speed_settings.png" alt="">
+<img src="images/trigger_and_speed_settings.png" alt="">
 
-<img src="BYU_Specific_information/images/trigger_and_speed_settings_mapping.png" alt="">
+<img src="images/trigger_and_speed_settings_mapping.png" alt="">
 
 </td>
 </tr>
@@ -213,7 +210,7 @@ Save the flight plan by pressing the "save and generate KMZ" button, also found 
 
 ### **The Viewer**
 
-<img src="BYU_Specific_information/images/viewer_overview.png" alt="" width="100%">
+<img src="images/viewer_overview.png" alt="" width="100%">
 
 This tab allows the user to view previously made flight plans. 
 Features include:
@@ -230,7 +227,7 @@ FAA restrictions may also be turned on or off with a toggle to the left.
 
 ### **The Editor** 
 
-<img src="BYU_Specific_information/images/editor_overview.png" alt="" width="100%">
+<img src="images/editor_overview.png" alt="" width="100%">
 
 **DJI_FLY missions are finicky in Editor at the moment**
 
@@ -263,7 +260,7 @@ These issues are circumvented by the *Photo Sorter* and *DJI Fly Transfer* tabs.
 
 ### **Photo Sorter**
 
-<img src="BYU_Specific_information/images/photo_sorter_overview.png" alt="" width="100%">
+<img src="images/photo_sorter_overview.png" alt="" width="100%">
 
 This tab allows you to automatically group mission photos into folders based on the times that they were taken. 
 It uses the following inputs:'
@@ -280,34 +277,27 @@ Useful if you know the order of your flights.
 
 ### **DJI Fly Transfer**
 
-<img src="BYU_Specific_information/images/DJI_fly_transfer_overview.png" alt="" width="100%">
+Missions are moved onto the controller by a small desktop app, downloaded from this tab - not by the planner itself.
+A browser has no access to USB, so a web-hosted planner cannot reach a controller plugged into your computer; the desktop app is the half of the job the browser cannot do.
 
-This tab allows you to transfer DJI Fly missions to a RC 2 controller directly from your computer. 
-It is split into the following sections:
+The tab itself is just the download and the instructions. The app does the work:
 
-#### 1. Source Missions
-Allows you to choose the folder where your missions are located from the root "mission" folder, a created subfolder, or another folder on your computer. 
-Choosing a folder will tell you how many missions are DJI_Fly-compatible and are available to be transferred. 
+#### 1. Get the app
+Download it from the tab, unzip it, and the first time **right-click the app and choose Open**, then Open again.
+Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once, because the app is not signed.
+macOS only for now.
 
-#### 2. Controller Nests
-Connect your powered on controller directly to your computer via a USB cable and press the scan button.
- After a few seconds it will tell you how many missions you currently have on the controller, and section 3 will appear. 
+#### 2. Transfer a mission
+Save at least one waypoint mission in DJI Fly first - the app overwrites a mission slot, so there has to be one to overwrite.
+On a Mac, quit Preview, Photos, and Image Capture: macOS lets only one program talk to the controller, and Preview being open by itself is enough to block the transfer.
 
-If section 3 is not showing, make sure the controller is powered on, and that the preview app (Mac), Android File Transfer tools, and MTP tools are closed and not running.
- These interfere with the connections.  
+Plug in the controller, then in the app choose a `.kmz` (or a folder of them), scan the controller, pick a slot, and transfer.
+Each slot is shown with a preview picture of the mission currently in it, so you can see what you are about to replace.
 
-#### 3. Assign and Transfer
-Once a mission folder is selected and the controller is connected, the assign and transfer section will appear. On the left side of the screen is the local missions and on the right the controller missions that will be overridden. At the top of the screen, you can change the number of missions that will be transferred.  
+Due to the restricted nature of the controller software, missions appear there as long strings of numbers and letters rather than names.
+This makes the thumbnail the practical way to tell which mission is which.
 
-To transfer a mission, first choose the number of missions to be transferred. 
-Then, using the dropdown boxes for each assignment, choose the local mission you want to import on the left and what mission on the controller you want to override on the right. 
-A thumbnail summary of the mission will appear below both the local and controller missions. 
-The controller mission thumbnail will either be the one created by the controller if the mission is not yet overwritten, or the summary thumbnail if previously overwritten.
-
-Due to the restricted nature of the controller software, the names of the controller missions appear as long strings of numbers and letters, and it is impossible to see the name of the mission that the controller displays. 
-This makes the thumbnail very important for knowing which mission is what on the controller. 
-
-After all local missions are assigned to a controller mission, press the "Execute Visual Transfer" button on the bottom to upload the missions.
+Controller Support: RC 2. RC does not work. RC Pro untested.
 
 #### Accessing Missions
 Viewing downloaded missions on the controller is a little different depending on if you are connected to a drone. 
@@ -326,7 +316,7 @@ Since this is one of the only ways to know which mission is which, short of look
 To update them, in the mission history page, click on a mission to have it load, and then go back to the mission history page and press the save button on the right. 
 This will update the thumbnail. 
 
-It is recommended to save and update the thumbnails immediately after transferring the missions. To help keep this straight, at the bottom of the DJI FLY Transfer tab, a checklist is generated showing the old mission thumbnail and the new mission name (along with the long string name). 
+It is recommended to save and update the thumbnails immediately after transferring the missions, while you still remember which slot you put each one in.
 
 ## Acknowledgements
 - Luigi Pirelli for providing the photo footprint code base. 
