@@ -277,27 +277,32 @@ Useful if you know the order of your flights.
 
 ### **DJI Fly Transfer**
 
-Missions are moved onto the controller by a small desktop app, downloaded from this tab - not by the planner itself.
-A browser has no access to USB, so a web-hosted planner cannot reach a controller plugged into your computer; the desktop app is the half of the job the browser cannot do.
+This tab hands out a small desktop app that puts missions onto the controller.
+The planner can't do it itself here: this version runs in a browser, and a browser has no way to reach a USB device.
+Plan the mission in the Creator, download the `.kmz`, then use the app to move it across.
 
-The tab itself is just the download and the instructions. The app does the work:
+#### 1. Download the app
+Press the download button on the tab and unzip what comes down.
+The first time, **right-click the app and choose Open**, then Open again.
+Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once - the app isn't signed, so that warning is expected and only shows up the first time.
 
-#### 1. Get the app
-Download it from the tab, unzip it, and the first time **right-click the app and choose Open**, then Open again.
-Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once, because the app is not signed.
-macOS only for now.
+#### 2. Prepare the controller
+Make sure at least one waypoint mission is already saved in DJI Fly.
+The app overwrites a mission slot rather than creating a new one, so there has to be something there to overwrite - two waypoints in a parking lot is enough.
 
-#### 2. Transfer a mission
-Save at least one waypoint mission in DJI Fly first - the app overwrites a mission slot, so there has to be one to overwrite.
-On a Mac, quit Preview, Photos, and Image Capture: macOS lets only one program talk to the controller, and Preview being open by itself is enough to block the transfer.
+On a Mac, quit Preview, Photos, and Image Capture before plugging in.
+macOS only lets one program talk to the controller at a time, and Preview being open by itself is enough to stop the transfer.
+The app checks for these when a scan fails and names whichever one is running.
 
-Plug in the controller, then in the app choose a `.kmz` (or a folder of them), scan the controller, pick a slot, and transfer.
-Each slot is shown with a preview picture of the mission currently in it, so you can see what you are about to replace.
+#### 3. Transfer
+Press **Choose .kmz...** for a single mission, or **Choose folder...** to pick from a folder you have been saving missions into.
+Then press **Scan controller**, choose a slot, and press **Transfer to controller**.
 
-Due to the restricted nature of the controller software, missions appear there as long strings of numbers and letters rather than names.
-This makes the thumbnail the practical way to tell which mission is which.
+Each slot is listed with a preview picture of the mission currently sitting in it.
+Due to the restricted nature of the controller software, the names of the controller missions appear as long strings of numbers and letters, so that picture is the only practical way to tell which mission is which - both when choosing what to overwrite and afterwards on the controller itself.
 
-Controller Support: RC 2. RC does not work. RC Pro untested.
+Once it's done, open the mission list in DJI Fly.
+If the new mission isn't there straight away, back out of the list and open it again.
 
 #### Accessing Missions
 Viewing downloaded missions on the controller is a little different depending on if you are connected to a drone. 
