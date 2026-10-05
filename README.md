@@ -24,7 +24,7 @@ pip install -r path/to/requirements.txt
 > **Note**: Update path/to/requirements.txt
 > with the relative path to the folder.
 
-> **Note**: the planner itself never talks to a controller on this fork - the desktop app downloaded from the DJI Fly Transfer tab does that, and it carries its own USB support.
+> **Note**: the planner never talks to a controller itself on this fork - the desktop app handed out by the DJI Fly Transfer tab does that, and it brings its own USB support with it.
 3. Launch the app by running the following in the terminal. 
 The app will open in your web browser using a local host.
 ```
@@ -44,7 +44,7 @@ FLIGHT_PLANNER_MULTI_USER=1
 ```
 On Streamlit Community Cloud this goes in the app's Settings &rarr; Secrets panel (as `FLIGHT_PLANNER_MULTI_USER = "1"`); anywhere else, set it as a normal environment variable before `streamlit run`. Off by default, so a plain local install is completely unaffected.
 
-With it on, each browser tab gets its own subfolder under `missions/_sessions/`, invisible to every other visitor, and disappears once that tab's session ends. The OS-native folder-browse buttons ("📂") also don't work in this kind of container (there's no desktop to show a folder picker on) - visitors should leave Save Destination on *Root (missions/)* and rely on the download button instead. The DJI Fly Transfer tab works fine in this setup: it hands out the desktop transfer app rather than touching USB itself.
+With it on, each browser tab gets its own subfolder under `missions/_sessions/`, invisible to every other visitor, and disappears once that tab's session ends. The OS-native folder-browse buttons ("📂") also don't work in this kind of container (there's no desktop to show a folder picker on), so in this mode the Creator's 📂 becomes a ⬇️ download button. It opens a window for saving one mission or a whole folder, either to the Downloads folder or to a location the visitor chooses (Chrome and Edge; Safari and Firefox always use the Downloads folder). Each mission comes with its preview picture, which the transfer app puts on the controller. The same button also appears under the Save buttons once something has been saved. The DJI Fly Transfer tab is fine in this setup: it hands out the desktop transfer app rather than reaching for USB itself.
 
 
 ## Using the Flight Planner
@@ -199,6 +199,7 @@ It does trade some extra turning for the saved photos, so on a few shapes the to
 Use this to know if you need to submit an LAANC report before flying. 
 In app submitting is not available, you must use another app to do so.
 
+<img src="images/FAA_viewer.png" alt="" width="100%">
 
 ##### Main Page Features
 * **Save Destination**: Located above the map. Use the drop down box to choose an existing mission or the default root "missions/" directory. You can create a new folder by pressing the "+" button, or browse to a custom folder location with the file icon. 
@@ -249,9 +250,27 @@ First, export your missions from their saved location and place them onto SD car
 Second, plug this SD card into your controller, navigate to your flight plans, and hit the import button in the top right corner. 
 From here navigate through your SD card storage to your flight plans, select all the ones you want, and upload them. 
 They are now ready to be used to fly the drone.
+You can also connect the controller via a USB cable and transfer that way. 
 
 ## Uploading Missions to a Commercial Series Drone (DJI Fly)
-*(This method is currently tested for DJI RC 2 controllers. The phone app is not yet tested, nor a RC controller.)*
+*(Controller support: **RC 2** works, confirmed against real hardware. The plain **DJI RC** (the
+model without "2" or "Pro" in the name, e.g. RM330) does **not** work and cannot be made to -
+see the note below. **RC Pro** has not been tested, but nothing found so far suggests it would
+fail the same way; treat it as untested rather than unsupported. The phone-based RC-N1/RC-N2
+setup (no built-in screen) is also not yet tested.)*
+
+> **Why the plain DJI RC doesn't work, and won't be fixed**: this was investigated thoroughly, not
+> just tried once. The controller connects and a session opens fine, but the folder DJI Fly stores
+> missions in (`Android/data/dji.go.v5/files/waypoint`) never appears in what the device is willing
+> to hand over - confirmed identically across two completely independent USB backends (`libmtp` on
+> Mac, Windows' own Portable Devices stack), before and after enabling every "show hidden storage"
+> setting reachable on the controller's own screen. Since two unrelated implementations that share
+> no code both see the identical restricted view, the limitation is coming from the controller's own
+> Android build, not from anything on the computer side - there is no driver, library, or setting on
+> the computer that can retrieve a folder the device itself declines to advertise. Confirmed present
+> even with a mission actually reachable via the controller's own local file browser, so the folder
+> existing isn't in question - only whether the controller will describe it to a connected computer,
+> and it won't. RC 2 does not have this restriction and works normally.
 
 As mentioned before, DJI makes it very difficult to upload pre-made flight plans into their commercial drones by heavily locking down their controllers and removing a native import button. 
 They also dump all mission images into one general folder, making it difficult to distinguish between different flight plans. 
@@ -282,9 +301,9 @@ The planner can't do it itself here: this version runs in a browser, and a brows
 Plan the mission in the Creator, download the `.kmz`, then use the app to move it across.
 
 #### 1. Download the app
-Press the download button on the tab and unzip what comes down.
-The first time, **right-click the app and choose Open**, then Open again.
-Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once - the app isn't signed, so that warning is expected and only shows up the first time.
+Press the download button for your computer on the tab. The app isn't signed, so each version needs one extra step the first time only - the warning is expected:
+- **macOS**: unzip what comes down, then **right-click the app and choose Open**, then Open again. Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once.
+- **Windows**: run the `.exe` - there is nothing to install. If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**.
 
 #### 2. Prepare the controller
 Make sure at least one waypoint mission is already saved in DJI Fly.
@@ -295,6 +314,7 @@ macOS only lets one program talk to the controller at a time, and Preview being 
 The app checks for these when a scan fails and names whichever one is running.
 
 #### 3. Transfer
+Keep each mission's `.jpg` preview next to its `.kmz` - the planner's download includes it - and the app puts it on the controller as that mission's thumbnail.
 Press **Choose .kmz...** for a single mission, or **Choose folder...** to pick from a folder you have been saving missions into.
 Then press **Scan controller**, choose a slot, and press **Transfer to controller**.
 
@@ -321,7 +341,7 @@ Since this is one of the only ways to know which mission is which, short of look
 To update them, in the mission history page, click on a mission to have it load, and then go back to the mission history page and press the save button on the right. 
 This will update the thumbnail. 
 
-It is recommended to save and update the thumbnails immediately after transferring the missions, while you still remember which slot you put each one in.
+It is recommended to save and update the thumbnails immediately after transferring the missions, while you still remember which slot each one went into.
 
 ## Acknowledgements
 - Luigi Pirelli for providing the photo footprint code base. 
