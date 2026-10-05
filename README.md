@@ -58,7 +58,7 @@ The *Photo Sorter* and *DJI Fly Transfer* are tabs designed specifically for get
 
 ### **The Creator**
 
-<img src="BYU_Specific_information/images/creator_overview.png" alt="" width="100%">
+<img src="images/creator_overview.png" alt="" width="100%">
 
 #### Selecting a Location
 Once the app is running, the map will be centered at BYU in Provo, Utah. 
@@ -97,7 +97,7 @@ It is limited to 99 photos per flight plan due to each photo having to be a wayp
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/hardware_and_payload_settings.png" alt="">
+<img src="images/hardware_and_payload_settings.png" alt="">
 
 </td>
 </tr>
@@ -119,7 +119,7 @@ Presets are saved to your computer and will still be there the next time you ope
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/global_config_settings.png" alt="">
+<img src="images/global_config_settings.png" alt="">
 
 </td>
 </tr>
@@ -145,7 +145,7 @@ This is very important if your flight plan is not over a flat surface.
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/waypoint_setting.png" alt="">
+<img src="images/waypoint_setting.png" alt="">
 
 </td>
 </tr>
@@ -189,9 +189,9 @@ It does trade some extra turning for the saved photos, so on a few shapes the to
 </td>
 <td width="40%">
 
-<img src="BYU_Specific_information/images/trigger_and_speed_settings.png" alt="">
+<img src="images/trigger_and_speed_settings.png" alt="">
 
-<img src="BYU_Specific_information/images/trigger_and_speed_settings_mapping.png" alt="">
+<img src="images/trigger_and_speed_settings_mapping.png" alt="">
 
 </td>
 </tr>
@@ -202,6 +202,7 @@ It does trade some extra turning for the saved photos, so on a few shapes the to
 Use this to know if you need to submit an LAANC report before flying. 
 In app submitting is not available, you must use another app to do so.
 
+<img src="images/FAA_viewer.png" alt="" width="100%">
 
 ##### Main Page Features
 * **Save Destination**: Located above the map. Use the drop down box to choose an existing mission or the default root "missions/" directory. You can create a new folder by pressing the "+" button, or browse to a custom folder location with the file icon. 
@@ -213,7 +214,7 @@ Save the flight plan by pressing the "save and generate KMZ" button, also found 
 
 ### **The Viewer**
 
-<img src="BYU_Specific_information/images/viewer_overview.png" alt="" width="100%">
+<img src="images/viewer_overview.png" alt="" width="100%">
 
 This tab allows the user to view previously made flight plans. 
 Features include:
@@ -230,7 +231,7 @@ FAA restrictions may also be turned on or off with a toggle to the left.
 
 ### **The Editor** 
 
-<img src="BYU_Specific_information/images/editor_overview.png" alt="" width="100%">
+<img src="images/editor_overview.png" alt="" width="100%">
 
 **DJI_FLY missions are finicky in Editor at the moment**
 
@@ -252,9 +253,27 @@ First, export your missions from their saved location and place them onto SD car
 Second, plug this SD card into your controller, navigate to your flight plans, and hit the import button in the top right corner. 
 From here navigate through your SD card storage to your flight plans, select all the ones you want, and upload them. 
 They are now ready to be used to fly the drone.
+You can also connect the controller via a USB cable and transfer that way. 
 
 ## Uploading Missions to a Commercial Series Drone (DJI Fly)
-*(This method is currently tested for DJI RC 2 controllers. The phone app is not yet tested, nor a RC controller.)*
+*(Controller support: **RC 2** works, confirmed against real hardware. The plain **DJI RC** (the
+model without "2" or "Pro" in the name, e.g. RM330) does **not** work and cannot be made to -
+see the note below. **RC Pro** has not been tested, but nothing found so far suggests it would
+fail the same way; treat it as untested rather than unsupported. The phone-based RC-N1/RC-N2
+setup (no built-in screen) is also not yet tested.)*
+
+> **Why the plain DJI RC doesn't work, and won't be fixed**: this was investigated thoroughly, not
+> just tried once. The controller connects and a session opens fine, but the folder DJI Fly stores
+> missions in (`Android/data/dji.go.v5/files/waypoint`) never appears in what the device is willing
+> to hand over - confirmed identically across two completely independent USB backends (`libmtp` on
+> Mac, Windows' own Portable Devices stack), before and after enabling every "show hidden storage"
+> setting reachable on the controller's own screen. Since two unrelated implementations that share
+> no code both see the identical restricted view, the limitation is coming from the controller's own
+> Android build, not from anything on the computer side - there is no driver, library, or setting on
+> the computer that can retrieve a folder the device itself declines to advertise. Confirmed present
+> even with a mission actually reachable via the controller's own local file browser, so the folder
+> existing isn't in question - only whether the controller will describe it to a connected computer,
+> and it won't. RC 2 does not have this restriction and works normally.
 
 As mentioned before, DJI makes it very difficult to upload pre-made flight plans into their commercial drones by heavily locking down their controllers and removing a native import button. 
 They also dump all mission images into one general folder, making it difficult to distinguish between different flight plans. 
@@ -263,7 +282,7 @@ These issues are circumvented by the *Photo Sorter* and *DJI Fly Transfer* tabs.
 
 ### **Photo Sorter**
 
-<img src="BYU_Specific_information/images/photo_sorter_overview.png" alt="" width="100%">
+<img src="images/photo_sorter_overview.png" alt="" width="100%">
 
 This tab allows you to automatically group mission photos into folders based on the times that they were taken. 
 It uses the following inputs:'
@@ -280,9 +299,11 @@ Useful if you know the order of your flights.
 
 ### **DJI Fly Transfer**
 
-<img src="BYU_Specific_information/images/DJI_fly_transfer_overview.png" alt="" width="100%">
+<img src="images/DJI_fly_transfer_overview.png" alt="" width="100%">
 
-This tab allows you to transfer DJI Fly missions to a RC 2 controller directly from your computer. 
+This tab allows you to transfer DJI Fly missions to a controller directly from your computer -
+confirmed working on **RC 2**; see the controller-support note above before relying on this with
+any other controller. 
 It is split into the following sections:
 
 #### 1. Source Missions
@@ -294,7 +315,12 @@ Connect your powered on controller directly to your computer via a USB cable and
  After a few seconds it will tell you how many missions you currently have on the controller, and section 3 will appear. 
 
 If section 3 is not showing, make sure the controller is powered on, and that the preview app (Mac), Android File Transfer tools, and MTP tools are closed and not running.
- These interfere with the connections.  
+ These interfere with the connections.
+
+ If none of that helps, check which controller you have first. A plain **DJI RC** (not RC 2, not
+ RC Pro) will never show section 3, no matter what is closed or reconfigured - see the note above.
+ This isn't a settings problem to keep troubleshooting; it's confirmed unfixable from the computer
+ side for that specific controller.
 
 #### 3. Assign and Transfer
 Once a mission folder is selected and the controller is connected, the assign and transfer section will appear. On the left side of the screen is the local missions and on the right the controller missions that will be overridden. At the top of the screen, you can change the number of missions that will be transferred.  

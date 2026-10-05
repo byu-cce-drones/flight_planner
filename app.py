@@ -16,6 +16,9 @@ import uuid
 from geopy.geocoders import Nominatim
 import folium
 from folium.plugins import Draw, PolyLineTextPath
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 # Optional: only the experimental decomposed coverage strategy needs shapely.
 # Imported defensively so a missing install degrades to "that option is
@@ -633,7 +636,7 @@ try:
             device_id = device_paths[0]
 
             client_info = _wpd_make_values()
-            client_info.SetStringValue(byref(WPD_CLIENT_NAME_KEY), "DJI Flight Planner")
+            client_info.SetStringValue(byref(WPD_CLIENT_NAME_KEY), "Flight Planner")
             client_info.SetUnsignedIntegerValue(byref(WPD_CLIENT_MAJOR_VERSION), 1)
             client_info.SetUnsignedIntegerValue(byref(WPD_CLIENT_MINOR_VERSION), 0)
             client_info.SetUnsignedIntegerValue(byref(WPD_CLIENT_REVISION), 0)
@@ -865,6 +868,12 @@ MS_TO_MPH = 2.23694
 ESRI_TILE_BASE = "https://server.arcgisonline.com/ArcGIS/rest/services"
 ESRI_IMAGERY_URL = f"{ESRI_TILE_BASE}/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}"
 ESRI_LABELS_URL = f"{ESRI_TILE_BASE}/Reference/World_Boundaries_and_Places/MapServer/tile/{{z}}/{{y}}/{{x}}"
+# World_Boundaries_and_Places carries place labels only (cities, towns) - it
+# has no street names, which is what Google's hybrid layer used to supply and
+# what mission naming (Street1_Street2) depends on. World_Transportation is
+# the third layer in Esri's own "Imagery Hybrid" recipe and is what puts road
+# casings and street labels back on the map.
+ESRI_TRANSPORT_URL = f"{ESRI_TILE_BASE}/Reference/World_Transportation/MapServer/tile/{{z}}/{{y}}/{{x}}"
 ESRI_STREET_TILE_URL = ESRI_TILE_BASE + "/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
 ESRI_ATTR = ("Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, "
              "and the GIS User Community")
@@ -874,7 +883,8 @@ BASEMAP_MAX_NATIVE_ZOOM = 19
 
 def add_basemap(fmap):
     """
-    Put the shared satellite basemap (imagery + place labels) on a folium map.
+    Put the shared satellite basemap (imagery + place labels + streets) on a
+    folium map.
 
     Every map in the app goes through here so the tile source, attribution and
     zoom caps can't drift apart between the Creator, Editor and Viewer - they
@@ -891,12 +901,25 @@ def add_basemap(fmap):
         overlay=True, control=False,
         max_zoom=BASEMAP_MAX_ZOOM, max_native_zoom=BASEMAP_MAX_NATIVE_ZOOM,
     ).add_to(fmap)
+    # Streets go on last so their labels sit above the place labels rather
+    # than being overdrawn by them. Same tile pane, so still under the path.
+    folium.TileLayer(
+        tiles=ESRI_TRANSPORT_URL, attr=ESRI_ATTR, name="Streets",
+        overlay=True, control=False,
+        max_zoom=BASEMAP_MAX_ZOOM, max_native_zoom=BASEMAP_MAX_NATIVE_ZOOM,
+    ).add_to(fmap)
     return fmap
+
+# Creator's "📏 Measure distance" tool. Hidden from the UI for now; the code
+# is kept intact so flipping this back to True restores it unchanged.
+MEASURE_TOOL_ENABLED = False
 
 MISSION_DIR = "missions"
 SURFACES_DIR = "surfaces"
+FLIGHT_LOG_DIR = "flight_log"
 os.makedirs(MISSION_DIR, exist_ok=True)
 os.makedirs(SURFACES_DIR, exist_ok=True)
+os.makedirs(FLIGHT_LOG_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Multi-user mode: per-session mission isolation
@@ -1358,6 +1381,46 @@ def is_dji_fly_kmz(kmz_path):
             return any(name.startswith('wpmz/') for name in kmz.namelist())
     except Exception:
         return False
+
+def get_kmz_first_waypoint(kmz_path):
+    """
+    (lat, lon) of a mission's first waypoint, or None if it can't be read.
+
+    A minimal, read-only subset of parse_kmz_for_editing's waylines.wpml
+    parsing - just enough to know roughly where a mission is, without pulling
+    in everything else that function computes (speeds, hardware, trigger
+    settings) that a flight-log location lookup has no use for.
+    """
+    try:
+        with zipfile.ZipFile(kmz_path, 'r') as kmz:
+            waylines_file = [n for n in kmz.namelist() if n.endswith('waylines.wpml')][0]
+            root_w = ET.fromstring(kmz.read(waylines_file))
+        c_node = root_w.find('.//{*}Placemark//{*}coordinates')
+        if c_node is None or not c_node.text:
+            return None
+        lon_str, lat_str = c_node.text.strip().split(',')[:2]
+        return float(lat_str), float(lon_str)
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def get_address_from_coords(lat, lon):
+    """
+    General address for a mission's location, via the same Nominatim service
+    get_coords_from_search already uses for the reverse direction. Cached per
+    -coordinate so regenerating a log for a folder whose missions haven't
+    changed doesn't re-hit the network for every mission again.
+    """
+    try:
+        geolocator = Nominatim(user_agent="dji_flight_planner_app")
+        location = geolocator.reverse((lat, lon), exactly_one=True, zoom=17, timeout=10)
+        if location:
+            return location.address
+    except Exception:
+        pass
+    return None
+
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_coords_from_search(query):
@@ -2220,6 +2283,23 @@ def extract_polygon_from_map_data(map_data):
                 return coords
     return None
 
+def extract_line_from_map_data(map_data):
+    """
+    Pulls the most recently drawn line from an st_folium result as a list of
+    (lat, lon) vertices, or None if nothing linear has been drawn. Mirrors
+    extract_polygon_from_map_data - a polygon left over from mapping mode has
+    a nested-ring geometry this can't consume, hence checking the type.
+    """
+    if not map_data or not map_data.get("all_drawings"):
+        return None
+    for drawing in reversed(map_data["all_drawings"]):
+        geom = drawing.get("geometry", {})
+        if geom.get("type") == "LineString" and geom.get("coordinates"):
+            coords = [(c[1], c[0]) for c in geom["coordinates"]]
+            if len(coords) >= 2:
+                return coords
+    return None
+
 def _strip_spans(poly, lo, hi, min_span_ft=1.0):
     """
     The disjoint x-intervals the area actually occupies inside the horizontal
@@ -2733,6 +2813,69 @@ def save_creator_presets(presets):
         return f"{type(e).__name__}: {e}"
 
 
+PILOT_INFO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pilot_info.json")
+
+
+def load_pilot_info():
+    if not os.path.exists(PILOT_INFO_FILE):
+        return {}
+    try:
+        with open(PILOT_INFO_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        st.session_state["_pilot_info_load_error"] = f"{type(e).__name__}: {e}"
+        return {}
+
+
+def save_pilot_info(name, certificate_number):
+    """
+    Writes the pilot name/certificate number file. Returns None on success or
+    the error text on failure - same reasoning as save_creator_presets: a
+    silently swallowed write failure would report "Saved" while leaving
+    nothing on disk for the next launch to load.
+    """
+    try:
+        with open(PILOT_INFO_FILE, 'w', encoding="utf-8") as f:
+            json.dump({"name": name, "certificate_number": certificate_number}, f, indent=2)
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+FLIGHT_LOG_COUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".flight_log_counts.json")
+
+
+def load_flight_log_counts():
+    if not os.path.exists(FLIGHT_LOG_COUNTS_FILE):
+        return {}
+    try:
+        with open(FLIGHT_LOG_COUNTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def next_flight_log_count(folder_path):
+    """
+    Bumps and returns the running "how many logs have been generated for
+    this folder" counter used in the log's filename, keyed by the folder's
+    absolute path so it stays correct regardless of which display label
+    (Root (missions/), a subfolder name, a browsed external path) happened
+    to be showing when it was clicked.
+    """
+    counts = load_flight_log_counts()
+    key = os.path.abspath(folder_path)
+    counts[key] = counts.get(key, 0) + 1
+    try:
+        with open(FLIGHT_LOG_COUNTS_FILE, 'w', encoding="utf-8") as f:
+            json.dump(counts, f, indent=2)
+    except Exception:
+        pass  # Worst case the count doesn't persist - not worth blocking the download over.
+    return counts[key]
+
+
 README_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md")
 # Matches README bullets of the form "* **Widget Label**: explanation text",
 # capturing everything up to the next such bullet (or a blank line/EOF).
@@ -2892,6 +3035,192 @@ def sanitize_filename_component(name):
     """
     cleaned = _WINDOWS_ILLEGAL_FILENAME_CHARS_RE.sub('', name).strip().rstrip('.')
     return cleaned or "Mission"
+
+
+# ==========================================
+# FLIGHT LOG TEMPLATE (DJI Fly Transfer tab)
+# ==========================================
+_FLIGHT_PARAM_SUFFIX_RE = re.compile(r'_H(\d+)A(\d+)OL(\d+)(?:SO\d+)?$')
+
+FLIGHT_LOG_HEADERS = [
+    "Date", "Flight Name", "Aircraft", "Mission Location",
+    "Height (ft)", "Pitch (°)", "Overlap (%)",
+    "Start Time", "Stop Time", "Minutes", "Remarks",
+]
+_FLIGHT_LOG_COL_WIDTHS = [12, 16, 12, 34, 10, 9, 11, 11, 11, 10, 28]
+_FLIGHT_LOG_NAVY = "1F3864"
+_FLIGHT_LOG_GREEN = "C6E0B4"   # auto-filled by the app
+_FLIGHT_LOG_YELLOW = "FFF2CC"  # fill in by hand
+_FLIGHT_LOG_BLUE = "BDD7EE"    # calculated by a formula - don't type over it
+_FLIGHT_LOG_GREY = "595959"
+
+
+def parse_flight_params_from_name(base_name):
+    """
+    (height_ft, pitch_deg, overlap_pct) parsed from a mission's own
+    "_H<height>A<pitch>OL<overlap>(SO<side-overlap>)" filename suffix - the
+    exact suffix strip_flight_suffix() removes. Returns (None, None, None)
+    if the name doesn't carry one (e.g. it was renamed outside the app's
+    convention).
+    """
+    m = _FLIGHT_PARAM_SUFFIX_RE.search(base_name)
+    if not m:
+        return None, None, None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def gather_flight_log_rows(folder, kmz_filenames, progress=None):
+    """
+    One row per mission KMZ in `folder`, with everything knowable before the
+    mission has actually been flown filled in: the name (mission-name
+    portion of the filename, stripped of its _Fly/_Pilot + _HxxAxxOLxx
+    suffix), the platform, its planned height/pitch/overlap (parsed from
+    that same suffix), and a general address reverse-geocoded from its first
+    waypoint. Date/times/minutes/remarks are left for the pilot to fill in
+    after flying.
+
+    `progress`, if given, is called with (index, total, filename) before
+    each mission is processed, so the caller can drive a progress bar - this
+    loop is Nominatim-rate-limited (sleeps between lookups), so a folder with
+    many missions takes real, visible time.
+    """
+    rows = []
+    for i, fname in enumerate(kmz_filenames):
+        if progress:
+            progress(i, len(kmz_filenames), fname)
+        full_path = os.path.join(folder, fname)
+        base_name = os.path.splitext(fname)[0]
+        height, pitch, overlap = parse_flight_params_from_name(base_name)
+        flight_name = strip_flight_suffix(base_name)
+
+        location = None
+        coords = get_kmz_first_waypoint(full_path)
+        if coords:
+            location = get_address_from_coords(*coords)
+            time.sleep(1)  # Nominatim usage policy: max ~1 request/second.
+
+        rows.append({
+            "flight_name": flight_name,
+            "aircraft": "DJI Fly",
+            "location": location or "",
+            "height": height,
+            "pitch": pitch,
+            "overlap": overlap,
+        })
+    return rows
+
+
+def build_flight_log_workbook(rows, pilot_name, certificate_number):
+    """
+    The actual downloadable flight-log spreadsheet - layout and legend match
+    the reviewed mockup (green = auto-filled by the app, yellow = fill in by
+    hand), plus a third color for Minutes, which is a live formula off
+    Start/Stop Time rather than another hand-filled cell (blue = calculated,
+    don't type over it) - driven by real mission data instead of the
+    mockup's four illustrative examples.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Flight Log"
+    last_col = get_column_letter(len(FLIGHT_LOG_HEADERS))
+
+    thin = Side(style="thin", color="B7B7B7")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def set_cell(coord, value, *, bold=False, italic=False, size=11, color="000000",
+                 fill=None, align=None, valign=None, border=False, wrap=False, underline=False):
+        c = ws[coord]
+        c.value = value
+        c.font = Font(name="Arial", bold=bold, italic=italic, size=size, color=color,
+                       underline="single" if underline else None)
+        if fill:
+            c.fill = PatternFill("solid", fgColor=fill)
+        if align or valign or wrap:
+            c.alignment = Alignment(horizontal=align, vertical=valign, wrap_text=wrap)
+        if border:
+            c.border = box
+        return c
+
+    ws.merge_cells(f"A1:{last_col}1")
+    set_cell("A1", "sUAS Pilot Logbook", bold=True, size=16, underline=True, align="left")
+    ws.merge_cells(f"A2:{last_col}2")
+    set_cell("A2", "Downloaded pre-filled from the Flight Planner's DJI Fly Transfer tab, one row per mission in the source folder.",
+              italic=True, size=9, color=_FLIGHT_LOG_GREY)
+
+    set_cell("B4", "", fill=_FLIGHT_LOG_GREEN, border=True)
+    set_cell("C4", "Auto-filled by the app", italic=True, size=9, color=_FLIGHT_LOG_GREY)
+    set_cell("E4", "", fill=_FLIGHT_LOG_YELLOW, border=True)
+    set_cell("F4", "Fill in by hand after the flight", italic=True, size=9, color=_FLIGHT_LOG_GREY)
+    set_cell("H4", "", fill=_FLIGHT_LOG_BLUE, border=True)
+    set_cell("I4", "Calculated - don't edit", italic=True, size=9, color=_FLIGHT_LOG_GREY)
+
+    set_cell("B6", "Pilot:", bold=True, align="right")
+    set_cell("C6", pilot_name, fill=_FLIGHT_LOG_GREEN, border=True)
+    set_cell("B7", "Certificate Number:", bold=True, align="right")
+    set_cell("C7", certificate_number, fill=_FLIGHT_LOG_GREEN, border=True)
+    set_cell("B8", "Log Start Date:", bold=True, align="right")
+    set_cell("C8", "", fill=_FLIGHT_LOG_YELLOW, border=True)
+    set_cell("B9", "Log End Date:", bold=True, align="right")
+    set_cell("C9", "", fill=_FLIGHT_LOG_YELLOW, border=True)
+
+    header_row = 14
+    data_first_row = header_row + 1
+    data_last_row = data_first_row + max(len(rows), 1) - 1
+
+    set_cell("F6", "Total Hours:", bold=True, align="right")
+    set_cell("G6", f"=SUM(J{data_first_row}:J{data_last_row})/60", align="center", border=True)
+    set_cell("F7", "Total Flights:", bold=True, align="right")
+    set_cell("G7", f"=COUNTA(A{data_first_row}:A{data_last_row})", align="center", border=True)
+    ws["G6"].number_format = "0.0"
+    ws["G7"].number_format = "0"
+
+    for i, (h, w) in enumerate(zip(FLIGHT_LOG_HEADERS, _FLIGHT_LOG_COL_WIDTHS), start=1):
+        col = get_column_letter(i)
+        set_cell(f"{col}{header_row}", h, bold=True, color="FFFFFF", fill=_FLIGHT_LOG_NAVY,
+                  align="center", valign="center", wrap=True, border=True)
+        ws.column_dimensions[col].width = w
+    ws.row_dimensions[header_row].height = 30
+
+    for offset, row in enumerate(rows):
+        r = data_first_row + offset
+        set_cell(f"A{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="center")                     # Date
+        set_cell(f"B{r}", row["flight_name"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")      # Flight Name
+        set_cell(f"C{r}", row["aircraft"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")         # Aircraft
+        set_cell(f"D{r}", row["location"], fill=_FLIGHT_LOG_GREEN, border=True, align="left")           # Mission Location
+        set_cell(f"E{r}", row["height"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")           # Height
+        set_cell(f"F{r}", row["pitch"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")            # Pitch
+        set_cell(f"G{r}", row["overlap"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")          # Overlap
+        set_cell(f"H{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="center")                     # Start Time
+        set_cell(f"I{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="center")                     # Stop Time
+        ws[f"H{r}"].number_format = "h:mm AM/PM"
+        ws[f"I{r}"].number_format = "h:mm AM/PM"
+        # MOD(..., 1) rather than a plain subtraction so a flight that
+        # crosses midnight (stop time earlier in the day than start time)
+        # still comes out positive instead of a stray negative minute count.
+        set_cell(f"J{r}", f'=IF(OR(H{r}="",I{r}=""),"",MOD(I{r}-H{r},1)*1440)',
+                  fill=_FLIGHT_LOG_BLUE, border=True, align="center")                                    # Minutes (calculated)
+        ws[f"J{r}"].number_format = "0.0"
+        set_cell(f"K{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="left")                       # Remarks
+        ws.row_dimensions[r].height = 18
+
+    # No missions - leave one bordered, fully-manual row so the sheet still
+    # looks like a template rather than a table with a header and nothing else.
+    if not rows:
+        r = data_first_row
+        for col_letter in ["A", "H", "I", "K"]:
+            set_cell(f"{col_letter}{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True)
+        for col_letter in ["B", "C", "D", "E", "F", "G"]:
+            set_cell(f"{col_letter}{r}", "", border=True)
+        ws[f"H{r}"].number_format = "h:mm AM/PM"
+        ws[f"I{r}"].number_format = "h:mm AM/PM"
+        set_cell(f"J{r}", f'=IF(OR(H{r}="",I{r}=""),"",MOD(I{r}-H{r},1)*1440)',
+                  fill=_FLIGHT_LOG_BLUE, border=True, align="center")
+        ws[f"J{r}"].number_format = "0.0"
+
+    ws.freeze_panes = f"A{data_first_row}"
+    ws.sheet_view.showGridLines = False
+    return wb
+
 
 def line_intersection_local(p_a, bearing_a, p_b, bearing_b):
     """
@@ -3744,8 +4073,7 @@ HTML_IMG_SRC_RE = re.compile(r'(<img\b[^>]*\bsrc\s*=\s*")([^"]+)(")', re.IGNOREC
 def _inline_local_images(text, base_dir):
     """
     GitHub serves README.md's images by fetching the real file at its
-    relative path, so `BYU_Specific_information/images/foo.png` just works
-    there. Streamlit's dev server has no route for that path though - it
+    relative path, so `images/foo.png` just works there. Streamlit's dev server has no route for that path though - it
     falls back to serving the app's own index.html for anything unmatched
     (with a 200, not a 404), so the browser tries to decode that HTML as an
     image and shows a broken icon instead. Swap local image paths for base64
@@ -3905,12 +4233,74 @@ def _readme_dialog():
 """, height=0)
 
 
+# Loaded once per session (not re-read on every rerun) so editing the file by
+# hand while the app is running doesn't fight with in-progress edits in the
+# dialog below - same reasoning as the other persisted-to-disk settings in
+# this app (Creator presets, tracker folder path).
+if "pilot_name" not in st.session_state:
+    _pilot_info = load_pilot_info()
+    st.session_state.pilot_name = _pilot_info.get("name", "")
+    st.session_state.pilot_cert = _pilot_info.get("certificate_number", "")
+
+
+@st.dialog("Pilot Info")
+def _pilot_info_dialog():
+    st.write("Saved on this computer and reused every time a flight log template is generated, so you only enter it once.")
+    name = st.text_input("Pilot Name", value=st.session_state.pilot_name, key="pilot_name_input")
+    cert = st.text_input("Certificate Number", value=st.session_state.pilot_cert, key="pilot_cert_input")
+    if st.button("💾 Save", width='stretch'):
+        err = save_pilot_info(name, cert)
+        if err:
+            st.error(f"Could not save: {err}")
+        else:
+            st.session_state.pilot_name = name
+            st.session_state.pilot_cert = cert
+            st.success("Saved.")
+
+    st.write("---")
+    # Streamlit only supports one open dialog at a time, so a second
+    # @st.dialog can't be nested inside this one for the confirmation step -
+    # it's handled as an inline reveal within this same dialog instead.
+    #
+    # No explicit st.rerun() anywhere below: every branch here already runs
+    # inside a button's on-click handler, which Streamlit reruns on its own -
+    # calling st.rerun() *inside an open dialog* closes it instead of just
+    # refreshing its contents (unlike the plain implicit rerun a click
+    # already triggers), which was closing this dialog the instant "Reset
+    # All Local Settings" was clicked instead of revealing the confirm step.
+    if not st.session_state.get("_show_reset_confirm"):
+        if st.button("⚠️ Reset All Local Settings", width='stretch'):
+            st.session_state._show_reset_confirm = True
+    else:
+        st.warning(
+            "This permanently deletes your saved pilot info, Creator parameter presets, "
+            "and flight-log folder counters from this computer. This cannot be undone."
+        )
+        reset_cancel_col, reset_ok_col = st.columns(2)
+        if reset_cancel_col.button("Cancel", width='stretch'):
+            st.session_state._show_reset_confirm = False
+        if reset_ok_col.button("Yes, Reset Everything", type="primary", width='stretch'):
+            for f in (PILOT_INFO_FILE, CREATOR_PRESETS_FILE, FLIGHT_LOG_COUNTS_FILE):
+                try:
+                    if os.path.exists(f):
+                        os.remove(f)
+                except Exception:
+                    pass
+            st.session_state.pilot_name = ""
+            st.session_state.pilot_cert = ""
+            st.session_state._show_reset_confirm = False
+            st.success("All local settings have been reset.")
+
+
 with st.container(key="app_header"):
-    header_title_col, header_tabs_col, header_readme_col = st.columns([1, 4, 0.6], gap="medium")
+    header_title_col, header_tabs_col, header_pilot_col, header_readme_col = st.columns([1, 4, 0.6, 0.6], gap="medium")
     with header_title_col:
-        st.markdown("# DJI Flight Planner")
+        st.markdown("# Flight Planner")
     with header_tabs_col:
         page = st.radio("Navigation", ["Creator", "Editor", "Viewer  |", "Photo Sorter", "DJI Fly Transfer"], horizontal=True, label_visibility="collapsed")
+    with header_pilot_col:
+        if st.button("🪪 Pilot", width='stretch', help="Set the pilot name and certificate number used on flight log templates"):
+            _pilot_info_dialog()
     with header_readme_col:
         if st.button("📖 README", width='stretch'):
             _readme_dialog()
@@ -4268,7 +4658,71 @@ if page == 'Creator':
         if st.session_state.c_browsed_dir:
             notices.caption(f"📁 Saving to custom path: {st.session_state.c_browsed_dir}")
 
+    # --- Measure tool ---
+    # An independent point-to-point ruler for "how far is my drone from the
+    # house/target", deliberately NOT built on the flight-line draw tool -
+    # two tools listening to the same map clicks would risk a measurement
+    # click landing as a stray flight-line vertex. Mutual exclusion is
+    # enforced by construction rather than by detecting misuse after the
+    # fact: while measure_mode is on, no Draw control is added to the map at
+    # all (see the mapping_mode/else branches below), so there is nothing on
+    # the map that could start or continue a flight line. Toggling this
+    # necessarily remounts the map (it changes what's drawn onto `m`, same
+    # as everything else in map_sig below), which drops an unfinished,
+    # not-yet-completed flight line exactly like any other map_sig change
+    # already does elsewhere in this app - hence finishing (or not having
+    # started) a line before measuring, not just a suggestion.
+    if "measure_mode" not in st.session_state:
+        st.session_state.measure_mode = False
+    if "measure_points" not in st.session_state:
+        st.session_state.measure_points = []
+    if "measure_last_clicked" not in st.session_state:
+        st.session_state.measure_last_clicked = None
+    if "corridor_line" not in st.session_state:
+        # The finished point-to-point flight line, kept independent of the
+        # live Draw layer for the same reason map_boundary already is above -
+        # re-rendering the map (measure mode toggling included) wipes
+        # client-side drawings, so anything meant to survive that has to live
+        # here instead of being re-parsed from all_drawings on every render.
+        st.session_state.corridor_line = None
+    if not MEASURE_TOOL_ENABLED:
+        # Also clears a measure mode left on from before the tool was hidden,
+        # which would otherwise keep the Draw control off the map with no
+        # checkbox left to turn it back on.
+        st.session_state.measure_mode = False
+        st.session_state.measure_points = []
+
     top_hud = hud_half.container()
+    with hud_half:
+        if MEASURE_TOOL_ENABLED:
+            measure_on = st.checkbox(
+                "📏 Measure distance", value=st.session_state.measure_mode, key="measure_toggle_cb",
+                help="Click two points on the map to measure the distance between them. "
+                     "Disables the drawing tools while active - finish or clear your flight "
+                     "line first.",
+            )
+            if measure_on != st.session_state.measure_mode:
+                st.session_state.measure_mode = measure_on
+                st.session_state.measure_points = []
+                st.session_state.measure_last_clicked = None
+                st.rerun()
+
+            if st.session_state.measure_mode:
+                n_pts = len(st.session_state.measure_points)
+                if n_pts == 0:
+                    st.caption("Click a start point on the map.")
+                elif n_pts == 1:
+                    st.caption("Click an end point on the map.")
+                else:
+                    # The distance itself is labeled on the map, right on the
+                    # measured line - see the midpoint marker below - so the HUD
+                    # only needs the reset control, not the number too.
+                    st.caption("Distance labeled on the line below.")
+                    if st.button("Measure again", key="measure_clear_btn"):
+                        st.session_state.measure_points = []
+                        st.session_state.measure_last_clicked = None
+                        st.rerun()
+
     with map_layer:
         # --- Retained map view ---
         # st_folium hands the map's HTML to the component, and ANY change to
@@ -4297,6 +4751,9 @@ if page == 'Creator':
             (safe_get_float('map_alt_ft', 100.0), safe_get_float('map_pitch', -90.0),
              safe_get_float('map_front_ol', 75.0), safe_get_float('map_side_ol', 65.0),
              side, map_runout, map_bearing) if mapping_mode else None,
+            st.session_state.measure_mode,
+            tuple(st.session_state.measure_points),
+            tuple(tuple(p) for p in (st.session_state.corridor_line or ())),
         )
         if map_sig != st.session_state.get("creator_map_sig"):
             st.session_state.creator_map_sig = map_sig
@@ -4331,12 +4788,15 @@ if page == 'Creator':
 
         if mapping_mode:
             # Area-drawing tools only; the flight line is computed, not drawn.
-            Draw(export=False, draw_options={
-                'polyline': False,
-                'polygon': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
-                'rectangle': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
-                'circle': False, 'circlemarker': False, 'marker': False,
-            }).add_to(m)
+            # Omitted entirely in measure mode - see the note by measure_mode's
+            # definition on why "no draw tool present" is how that's enforced.
+            if not st.session_state.measure_mode:
+                Draw(export=False, draw_options={
+                    'polyline': False,
+                    'polygon': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
+                    'rectangle': {'shapeOptions': {'color': '#00ffff', 'weight': 3}},
+                    'circle': False, 'circlemarker': False, 'marker': False,
+                }).add_to(m)
 
             # Overlay the stored boundary and its computed serpentine path. The
             # boundary lives in our own session key (not just the Draw layer)
@@ -4364,20 +4824,79 @@ if page == 'Creator':
         else:
             # Polyline only - a corridor mission is a single flight line, so the
             # area/point tools are disabled to avoid drawing shapes this mode
-            # can't consume.
-            Draw(export=False, draw_options={
-                'polyline': {'shapeOptions': {'color': '#00ffff', 'weight': 5}},
-                'polygon': False, 'rectangle': False,
-                'circle': False, 'circlemarker': False, 'marker': False,
-            }).add_to(m)
+            # can't consume. Also omitted entirely in measure mode.
+            if not st.session_state.measure_mode:
+                Draw(export=False, draw_options={
+                    'polyline': {'shapeOptions': {'color': '#00ffff', 'weight': 5}},
+                    'polygon': False, 'rectangle': False,
+                    'circle': False, 'circlemarker': False, 'marker': False,
+                }).add_to(m)
+
+            # Once finished, the line lives in our own session key (not just
+            # the Draw layer) for the same reason map_boundary does above -
+            # re-rendering the map wipes client-side drawings, measure mode's
+            # remount included. Redrawn as a plain (non-editable) preview;
+            # "Clear flight line" below is how to get an editable one back,
+            # same tradeoff map_boundary already makes for polygons.
+            if st.session_state.corridor_line:
+                folium.PolyLine(
+                    st.session_state.corridor_line, color="#00ffff", weight=5,
+                    tooltip="Flight line",
+                ).add_to(m)
+
+        if st.session_state.measure_mode:
+            # Points are redrawn from session state each render rather than
+            # relying on anything client-side surviving - the same reason
+            # map_boundary's preview above is redrawn from state instead of
+            # trusting the Draw layer to still have it.
+            pts = st.session_state.measure_points
+            for i, p in enumerate(pts):
+                folium.Marker(
+                    p, tooltip=f"Point {i + 1}",
+                    icon=folium.Icon(color="orange", icon="record", prefix="fa"),
+                ).add_to(m)
+            if len(pts) == 2:
+                folium.PolyLine(pts, color="#ff8800", weight=3, dash_array="6 6").add_to(m)
+                # The distance reads right off the line itself - a metric up in
+                # the HUD was one more thing pushing that bar's height, for a
+                # number that means more sitting next to what it's measuring.
+                dist_ft = get_haversine_dist(pts[0], pts[1]) * M_TO_FT
+                midpoint = ((pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2)
+                folium.Marker(
+                    midpoint,
+                    icon=DivIcon(html=(
+                        '<div style="background:white; border:2px solid #ff8800; '
+                        'border-radius:4px; padding:3px 8px; font-size:13px; '
+                        'font-weight:600; color:#000; white-space:nowrap; '
+                        'transform:translate(-50%,-50%);">'
+                        f'{dist_ft:,.1f} ft</div>'
+                    )),
+                ).add_to(m)
 
         map_data = st_folium(m, use_container_width=True, height=1000, key="creator_map")
 
-        if mapping_mode:
+        if st.session_state.measure_mode:
+            clicked = map_data.get("last_clicked") if map_data else None
+            # last_clicked holds whatever was last clicked until something
+            # newer replaces it - comparing against the previous value is
+            # what turns that into a one-shot "a new click just happened"
+            # signal instead of re-appending the same click on every rerun
+            # this page happens to do for an unrelated reason.
+            if clicked and clicked != st.session_state.measure_last_clicked:
+                st.session_state.measure_last_clicked = clicked
+                if len(st.session_state.measure_points) < 2:
+                    st.session_state.measure_points.append((clicked["lat"], clicked["lng"]))
+                    st.rerun()
+        elif mapping_mode:
             detected_boundary = extract_polygon_from_map_data(map_data)
             if detected_boundary and detected_boundary != st.session_state.map_boundary:
                 st.session_state.map_boundary = detected_boundary
                 st.rerun()  # re-render immediately so the computed path overlay appears
+        else:
+            detected_line = extract_line_from_map_data(map_data)
+            if detected_line and detected_line != st.session_state.corridor_line:
+                st.session_state.corridor_line = detected_line
+                st.rerun()  # re-render immediately so the persisted-preview line appears
 
         if map_data and map_data.get("center"):
             st.session_state.creator_center = [map_data["center"]["lat"], map_data["center"]["lng"]]
@@ -4527,13 +5046,11 @@ if page == 'Creator':
                     "straight line. Delete it with the bin icon and draw an area with width to it."
                 )
 
-    elif map_data.get("all_drawings") and any(
-        d.get('geometry', {}).get('type') == 'LineString' for d in map_data["all_drawings"]
-    ):
-        # Only consider drawn lines here - a polygon left over from mapping
-        # mode has a nested-ring geometry this corridor flow can't consume.
-        line_drawing = [d for d in map_data["all_drawings"] if d.get('geometry', {}).get('type') == 'LineString'][-1]
-        coords = [(c[1], c[0]) for c in line_drawing['geometry']['coordinates']]
+    elif st.session_state.corridor_line:
+        # Read from the persisted copy, not all_drawings directly - the Draw
+        # layer it comes from doesn't survive a remount (measure mode's
+        # included), but session state does. See corridor_line's own note.
+        coords = st.session_state.corridor_line
         total_dist_ft = sum(get_haversine_dist(coords[i], coords[i+1]) for i in range(len(coords)-1)) * M_TO_FT
 
         # Read the interval from session state, not the sidebar local: t_val_sec
@@ -4550,12 +5067,17 @@ if page == 'Creator':
             save_disabled = not render_99_override(notices, "cline", est_photos)
 
         with top_hud:
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1])
             c1.metric("Total Path Distance", f"{total_dist_ft:.1f} ft")
             c2.metric("Estimated Photos", f"{est_photos}" + (" / 99" if is_dji_fly else ""))
             with c3:
                 st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
                 save_clicked = st.button("Save & Generate KMZ", width='stretch', disabled=save_disabled)
+            with c4:
+                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+                if st.button("🗑 Clear flight line", width='stretch', key="btn_clear_corridor_line"):
+                    st.session_state.corridor_line = None
+                    st.rerun()
 
             if save_clicked:
                 with notices.spinner("Calculating terrain elevations and generating KMZ..."):
@@ -5769,6 +6291,46 @@ elif page == 'DJI Fly Transfer':
             # checklist of exactly what was just transferred rather than leaving
             # the user to remember on their own.
             if st.session_state.get("last_transfer_checklist"):
+                # The flight log should reflect what's actually on the
+                # controller now, not every KMZ sitting in the source folder
+                # (that folder can hold missions from unrelated batches, old
+                # tests, etc.) - so it only appears once there's a completed
+                # transfer to draw from, and uses that same checklist as its
+                # mission list rather than re-scanning active_dir.
+                transferred_kmz_names = [kmz_name for kmz_name, target_uuid in st.session_state.last_transfer_checklist]
+
+                st.write("---")
+                if st.button("⬇️ Download Flight Log", width='stretch',
+                             help="Generates a flight-log spreadsheet pre-filled with the missions just transferred above."):
+                    if not st.session_state.pilot_name.strip():
+                        st.warning("Set your pilot name using the 🪪 Pilot button in the header before downloading a flight log.")
+                    else:
+                        log_progress = st.progress(0, text="Looking up mission locations...")
+
+                        def _log_progress(i, total, fname):
+                            log_progress.progress(i / total, text=f"Looking up {fname}...")
+
+                        rows = gather_flight_log_rows(active_dir, transferred_kmz_names, progress=_log_progress)
+                        log_progress.progress(1.0, text="Building spreadsheet...")
+
+                        wb = build_flight_log_workbook(rows, st.session_state.pilot_name, st.session_state.pilot_cert)
+
+                        pilot_component = sanitize_filename_component(st.session_state.pilot_name).replace(" ", "_")
+                        folder_component = sanitize_filename_component(os.path.basename(os.path.normpath(active_dir)) or "missions")
+                        count = next_flight_log_count(active_dir)
+                        log_filename = f"Flight_Log_{pilot_component}_{folder_component}_{count}.xlsx"
+                        log_path = os.path.join(FLIGHT_LOG_DIR, log_filename)
+                        wb.save(log_path)
+
+                        log_progress.empty()
+                        st.success(f"Saved **{log_filename}** to the local `{FLIGHT_LOG_DIR}/` folder with {len(rows)} mission(s) pre-filled.")
+                        with open(log_path, "rb") as f:
+                            st.download_button(
+                                "💾 Save a copy from the browser", f.read(), file_name=log_filename,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_flight_log",
+                            )
+
                 st.write("---")
                 st.subheader("📋 Manual Thumbnail Refresh Checklist")
                 st.info(
