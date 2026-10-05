@@ -23,10 +23,11 @@ WHAT GOES IN, PER PLATFORM
 
   Windows         Nothing to bundle. That backend is WPD through comtypes,
                   and WPD is part of Windows. comtypes generates its COM
-                  wrappers at runtime, so its generated-module package is
-                  forced in as a hidden import - the usual reason a frozen
-                  comtypes app dies with ModuleNotFoundError on a machine
-                  that never ran it from source.
+                  wrappers at runtime, so the build generates the WPD ones
+                  up front and forces them in as hidden imports - the usual
+                  reason a frozen comtypes app dies with ModuleNotFoundError
+                  on a machine that never ran it from source.
+                  Needs:  pip install pyinstaller comtypes pillow
 
 SIGNING - the part that bites students, not you
 
@@ -92,6 +93,15 @@ def preflight():
                 "different transfer code than the planner. Run:  python build_core.py"
             )
 
+    if platform.system() == "Windows":
+        try:
+            import comtypes  # noqa: F401
+        except ImportError:
+            problems.append(
+                "comtypes is not installed, so the build would produce an app that cannot "
+                "reach a controller. Run:  pip install comtypes"
+            )
+
     if platform.system() != "Windows" and find_libmtp() is None:
         problems.append(
             "libmtp not found, so the build would produce an app that cannot reach a "
@@ -143,7 +153,24 @@ def build():
     if platform.system() == "Windows":
         # comtypes builds its wrappers at runtime, so the generated package
         # is invisible to static analysis and has to be named explicitly.
-        args += ["--hidden-import", "comtypes", "--hidden-import", "comtypes.gen"]
+        # Naming comtypes.gen alone only brings the empty package, leaving the
+        # frozen app to regenerate the WPD wrappers into a temp cache on every
+        # student's first launch. Generate them here instead, on the build
+        # machine, and carry the finished modules in the bundle.
+        generated = subprocess.run(
+            [sys.executable, "-c",
+             "import comtypes.client as c; "
+             "c.GetModule('PortableDeviceApi.dll'); c.GetModule('PortableDeviceTypes.dll')"],
+            capture_output=True, text=True,
+        )
+        if generated.returncode != 0:
+            print("Cannot build: could not generate the WPD wrappers with comtypes.\n")
+            print(generated.stderr)
+            return 1
+        args += [
+            "--hidden-import", "comtypes", "--hidden-import", "comtypes.gen",
+            "--collect-submodules", "comtypes.gen",
+        ]
     else:
         libmtp = find_libmtp()
         separator = ";" if platform.system() == "Windows" else ":"

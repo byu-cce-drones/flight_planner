@@ -111,7 +111,26 @@ Output differs by platform, deliberately:
   downloaded app. PyInstaller deprecated that combination and makes it an
   error in v7.
 
-The current Mac build is ~15 MB zipped.
+The current Mac build is ~15 MB zipped; the Windows `.exe` is ~17 MB.
+
+On Windows the build machine needs `pip install pyinstaller comtypes pillow`.
+The build generates comtypes' WPD wrappers itself and bundles them, so the
+`.exe` does no COM code generation on a student's machine.
+
+### Publishing a build
+
+The planner's DJI Fly Transfer tab links to the **latest GitHub release** by
+fixed asset names, so upload each build to a release under exactly these
+names (rename the files from `dist/` when attaching them):
+
+| Platform | `dist/` output | Release asset name |
+|---|---|---|
+| macOS | `DJI Fly Mission Transfer.zip` | `DJI-Fly-Mission-Transfer-mac.zip` |
+| Windows | `DJI Fly Mission Transfer.exe` | `DJI-Fly-Mission-Transfer-windows.exe` |
+
+Both assets must be on the *same* (latest) release - `releases/latest`
+only ever points at one release, so publishing a new release that carries
+only one platform's file breaks the other platform's download button.
 
 `build_installer.py` refuses to build if anything is off - PyInstaller
 missing, libmtp missing, or the transfer code out of sync - rather than

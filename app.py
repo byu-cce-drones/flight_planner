@@ -1301,9 +1301,11 @@ def export_mission_kmz_from_strings(template_kml_str, waylines_wpml_str, output_
 
 def offer_kmz_download(container, scope, filepath=None, filename=None):
     """
-    "Download KMZ" button for the most recently saved mission in one Creator/
-    Editor flow, so the file actually leaves the server rather than only
-    existing in a folder no one but the app itself can reach.
+    "Download missions" button for one Creator/Editor flow, so saved missions
+    actually leave the server rather than only existing in a folder no one
+    but the app itself can reach. It opens _download_missions_dialog, which
+    lets the student take one mission or a whole folder, and choose where it
+    goes; the most recently saved mission in this flow is preselected there.
 
     Only renders in MULTI_USER_MODE. Locally, the save folder IS the user's
     own missions/ directory - they're already looking straight at the file in
@@ -1323,21 +1325,209 @@ def offer_kmz_download(container, scope, filepath=None, filename=None):
     download button placed only inside that branch would vanish again the
     instant the user touched anything else, which defeats the purpose for a
     student who saves a mission and then, say, nudges the altitude field
-    before remembering to grab the file.
+    before remembering to grab the file. Once anything has been saved this
+    session the button stays, in every flow - a student who saves into a
+    folder from the Creator can still fetch the whole folder later.
     """
     if not MULTI_USER_MODE:
         return
     key = f"_last_saved_kmz_{scope}"
     if filepath is not None:
+        # Record only. Every save flow follows this with the plain redraw
+        # call, and drawing here too put two widgets with the same key on the
+        # page on the rerun where Save was clicked.
         st.session_state[key] = {"path": filepath, "name": filename}
-    saved = st.session_state.get(key)
-    if saved and os.path.exists(saved["path"]):
-        with open(saved["path"], "rb") as f:
-            container.download_button(
-                "⬇️ Download KMZ", f.read(), file_name=saved["name"],
-                mime="application/vnd.google-earth.kmz", key=f"dl_{scope}",
-                width='stretch',
-            )
+        return
+    if not any(_downloadable_missions().values()):
+        return
+    if container.button("⬇️ Download missions...", key=f"dl_{scope}", width='stretch', type="primary"):
+        saved = st.session_state.get(key)
+        _download_missions_dialog(saved["path"] if saved else None)
+
+
+# Shown in place of a subfolder's name for missions saved straight into the
+# session's top-level folder (Save Destination "Root (missions/)").
+DOWNLOAD_ROOT_LABEL = "Main folder"
+
+
+def _downloadable_missions():
+    """
+    {folder label: [kmz paths, newest first]} for this session's missions.
+
+    Covers MISSION_DIR and the one level of subfolders the Save Destination
+    "+" creates - the only places the website version can save to. Folders
+    with no missions are left out.
+    """
+    found = {}
+    folders = [(DOWNLOAD_ROOT_LABEL, MISSION_DIR)] + sorted(
+        (d, os.path.join(MISSION_DIR, d)) for d in os.listdir(MISSION_DIR)
+        if os.path.isdir(os.path.join(MISSION_DIR, d)) and not d.startswith((".", "_"))
+    )
+    for label, folder in folders:
+        paths = [os.path.join(folder, f) for f in os.listdir(folder) if is_kmz_file(f)]
+        if paths:
+            found[label] = sorted(paths, key=os.path.getmtime, reverse=True)
+    return found
+
+
+def _mission_files(kmz_path):
+    """
+    (filename, bytes) for a mission and its summary thumbnail.
+
+    The thumbnail has to travel with the .kmz: the transfer app pushes the
+    .jpg sitting next to a mission onto the controller as that slot's
+    preview, which is how students tell missions apart in DJI Fly at all.
+    """
+    files = []
+    for path in (kmz_path, kmz_companion_path(kmz_path)):
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                files.append((os.path.basename(path), f.read()))
+    return files
+
+
+@st.dialog("Download missions")
+def _download_missions_dialog(preselect_path=None):
+    missions = _downloadable_missions()
+    if not missions:
+        st.info("Nothing saved yet - use **Save & Generate KMZ** first.")
+        return
+
+    what = st.radio("Download", ["One mission", "A whole folder"], horizontal=True, key="dl_what")
+    if what == "One mission":
+        choices = [(label, path) for label, paths in missions.items() for path in paths]
+        names = [
+            os.path.basename(path) if label == DOWNLOAD_ROOT_LABEL
+            else f"{label} / {os.path.basename(path)}"
+            for label, path in choices
+        ]
+        paths = [path for _, path in choices]
+        default = paths.index(preselect_path) if preselect_path in paths else 0
+        picked = st.selectbox("Mission", names, index=default, key="dl_mission")
+        files = _mission_files(paths[names.index(picked)])
+        bundle_name = None
+    else:
+        labels = list(missions)
+        picked = st.selectbox(
+            "Folder", labels, key="dl_folder",
+            format_func=lambda label: f"{label}  ({len(missions[label])} missions)",
+        )
+        files = [f for path in missions[picked] for f in _mission_files(path)]
+        bundle_name = (picked != DOWNLOAD_ROOT_LABEL and sanitize_filename_component(picked)) or "missions"
+
+    where = st.radio(
+        "Save to", ["Downloads folder", "Choose a location..."], horizontal=True, key="dl_where",
+        help="Choosing a location works in Chrome and Edge. Safari and Firefox always save "
+             "to the Downloads folder (or ask, if that is turned on in the browser's settings).",
+    )
+    if where == "Downloads folder" and bundle_name:
+        # A browser can't download a folder, so a folder goes as one .zip.
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+            for name, data in files:
+                bundle.writestr(f"{bundle_name}/{name}", data)
+        files = [(f"{bundle_name}.zip", buffer.getvalue())]
+
+    _render_download_widget(files, pick_location=(where != "Downloads folder"), subfolder=bundle_name)
+    if where == "Downloads folder" and not bundle_name and len(files) > 1:
+        st.caption(
+            "Two files: the mission and its preview picture. Keep them together - the "
+            "transfer app puts the picture on the controller so you can tell missions "
+            "apart. If the browser asks to allow multiple downloads, allow it."
+        )
+
+
+def _render_download_widget(files, pick_location, subfolder=None):
+    """
+    The actual save button, in a small HTML component.
+
+    Downloads-folder saves could be an st.download_button, but choosing a
+    location can't: only the browser's File System Access API
+    (showDirectoryPicker) lets a page write somewhere the user picks, and it
+    has to be called from a click handler in the page itself. Both modes live
+    here so the dialog has one button either way. The picker is called on the
+    topmost same-origin window that has it, since some browsers refuse to
+    show pickers from inside a sandboxed iframe like this component.
+    """
+    payload = [{"name": name, "b64": base64.b64encode(data).decode("ascii")} for name, data in files]
+    label = "📁 Choose folder and save" if pick_location else "⬇️ Download"
+    components.html(f"""
+<div id="wrap">
+  <button id="go">{label}</button>
+  <div id="status"></div>
+</div>
+<style>
+  body {{ margin: 0; font-family: "Source Sans Pro", "Source Sans 3", sans-serif; }}
+  #go {{ width: 100%; padding: 0.55rem 0.75rem; font-size: 1rem; border-radius: 0.5rem;
+         border: 1px solid #ff4b4b; background: #ff4b4b; color: #fff; cursor: pointer; }}
+  #go:hover {{ background: #ff2b2b; }}
+  #go:disabled {{ opacity: 0.5; cursor: default; }}
+  #status {{ margin-top: 0.5rem; font-size: 0.9rem; min-height: 1.2em; }}
+</style>
+<script>
+const FILES = {json.dumps(payload)};
+const PICK = {json.dumps(pick_location)};
+const SUBFOLDER = {json.dumps(subfolder)};
+const button = document.getElementById("go");
+const status = document.getElementById("status");
+
+// Follow the app's light/dark theme for the status text.
+try {{ status.style.color = getComputedStyle(window.parent.document.body).color; }} catch (e) {{}}
+
+function blobOf(file) {{
+  const bytes = Uint8Array.from(atob(file.b64), c => c.charCodeAt(0));
+  return new Blob([bytes]);
+}}
+
+function pickerHost() {{
+  for (const w of [window.top, window.parent, window]) {{
+    try {{ if (typeof w.showDirectoryPicker === "function") return w; }} catch (e) {{}}
+  }}
+  return null;
+}}
+
+function say(text, isError) {{
+  status.textContent = text;
+  if (isError) status.style.color = "#d33";
+}}
+
+if (PICK && !pickerHost()) {{
+  button.disabled = true;
+  say("This browser can't save to a chosen location (Chrome and Edge can). Pick " +
+      "\\"Downloads folder\\" instead.", true);
+}}
+
+button.addEventListener("click", async () => {{
+  if (!PICK) {{
+    FILES.forEach((file, i) => setTimeout(() => {{
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blobOf(file));
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {{ URL.revokeObjectURL(a.href); a.remove(); }}, 10000);
+    }}, i * 400));
+    say(FILES.length === 1 ? "Downloading " + FILES[0].name
+                           : "Downloading " + FILES.length + " files");
+    return;
+  }}
+  try {{
+    let dir = await pickerHost().showDirectoryPicker({{ id: "flight-planner", mode: "readwrite", startIn: "downloads" }});
+    if (SUBFOLDER) dir = await dir.getDirectoryHandle(SUBFOLDER, {{ create: true }});
+    for (const file of FILES) {{
+      const handle = await dir.getFileHandle(file.name, {{ create: true }});
+      const out = await handle.createWritable();
+      await out.write(blobOf(file));
+      await out.close();
+    }}
+    say("Saved " + FILES.length + " file" + (FILES.length === 1 ? "" : "s") + " to \\"" + dir.name + "\\".");
+  }} catch (e) {{
+    if (e.name === "AbortError") say("Cancelled - nothing saved.");
+    else say("Couldn't save there (" + e.message + "). Try another folder, or \\"Downloads folder\\".", true);
+  }}
+}});
+</script>
+""", height=90)
 
 
 def is_kmz_file(filename):
@@ -4664,7 +4854,13 @@ if page == 'Creator':
             )
         with save_col2:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if st.button("📂", key="c_btn_browse_dir", help="Browse for a save directory", width='stretch'):
+            if MULTI_USER_MODE:
+                # A hosted server has no desktop to show a folder picker on,
+                # so on the website this spot downloads saved missions instead.
+                if st.button("⬇️", key="c_btn_download_missions", width='stretch',
+                             help="Download saved missions - one mission or a whole folder"):
+                    _download_missions_dialog()
+            elif st.button("📂", key="c_btn_browse_dir", help="Browse for a save directory", width='stretch'):
                 picked = pick_folder_dialog("Select Save Directory")
                 if picked:
                     st.session_state.c_browsed_dir = picked
@@ -6119,6 +6315,9 @@ elif page == 'DJI Fly Transfer':
     TRANSFER_APP_MAC_URL = (
         f"{TRANSFER_APP_REPO}/releases/latest/download/DJI-Fly-Mission-Transfer-mac.zip"
     )
+    TRANSFER_APP_WINDOWS_URL = (
+        f"{TRANSFER_APP_REPO}/releases/latest/download/DJI-Fly-Mission-Transfer-windows.exe"
+    )
 
     with st.container(key="page_body"):
         st.header("DJI Fly Mission Transfer")
@@ -6129,15 +6328,25 @@ elif page == 'DJI Fly Transfer':
         )
 
         st.subheader("1. Get the app")
-        st.link_button(
-            "Download for macOS", TRANSFER_APP_MAC_URL, width='stretch', type="primary",
-        )
-        st.caption(
-            "Unzip it, then the first time **right-click the app and choose Open**, then "
-            "Open again. Double-clicking refuses with \"unidentified developer\" or "
-            "\"damaged\" until you have done that once, because the app is not signed."
-        )
-        st.info("A Windows version is not available yet.")
+        mac_col, windows_col = st.columns(2)
+        with mac_col:
+            st.link_button(
+                "Download for macOS", TRANSFER_APP_MAC_URL, width='stretch', type="primary",
+            )
+            st.caption(
+                "Unzip it, then the first time **right-click the app and choose Open**, then "
+                "Open again. Double-clicking refuses with \"unidentified developer\" or "
+                "\"damaged\" until you have done that once, because the app is not signed."
+            )
+        with windows_col:
+            st.link_button(
+                "Download for Windows", TRANSFER_APP_WINDOWS_URL, width='stretch', type="primary",
+            )
+            st.caption(
+                "Nothing to install - just run the `.exe`. The first time, Windows may show "
+                "\"Windows protected your PC\": click **More info**, then **Run anyway**. It "
+                "asks because the app is not signed."
+            )
 
         st.subheader("2. Use it")
         st.markdown(

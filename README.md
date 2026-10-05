@@ -44,7 +44,7 @@ FLIGHT_PLANNER_MULTI_USER=1
 ```
 On Streamlit Community Cloud this goes in the app's Settings &rarr; Secrets panel (as `FLIGHT_PLANNER_MULTI_USER = "1"`); anywhere else, set it as a normal environment variable before `streamlit run`. Off by default, so a plain local install is completely unaffected.
 
-With it on, each browser tab gets its own subfolder under `missions/_sessions/`, invisible to every other visitor, and disappears once that tab's session ends. The OS-native folder-browse buttons ("📂") also don't work in this kind of container (there's no desktop to show a folder picker on) - visitors should leave Save Destination on *Root (missions/)* and rely on the download button instead. The DJI Fly Transfer tab is fine in this setup: it hands out the desktop transfer app rather than reaching for USB itself.
+With it on, each browser tab gets its own subfolder under `missions/_sessions/`, invisible to every other visitor, and disappears once that tab's session ends. The OS-native folder-browse buttons ("📂") also don't work in this kind of container (there's no desktop to show a folder picker on), so in this mode the Creator's 📂 becomes a ⬇️ download button. It opens a window for saving one mission or a whole folder, either to the Downloads folder or to a location the visitor chooses (Chrome and Edge; Safari and Firefox always use the Downloads folder). Each mission comes with its preview picture, which the transfer app puts on the controller. The same button also appears under the Save buttons once something has been saved. The DJI Fly Transfer tab is fine in this setup: it hands out the desktop transfer app rather than reaching for USB itself.
 
 
 ## Using the Flight Planner
@@ -301,9 +301,9 @@ The planner can't do it itself here: this version runs in a browser, and a brows
 Plan the mission in the Creator, download the `.kmz`, then use the app to move it across.
 
 #### 1. Download the app
-Press the download button on the tab and unzip what comes down.
-The first time, **right-click the app and choose Open**, then Open again.
-Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once - the app isn't signed, so that warning is expected and only shows up the first time.
+Press the download button for your computer on the tab. The app isn't signed, so each version needs one extra step the first time only - the warning is expected:
+- **macOS**: unzip what comes down, then **right-click the app and choose Open**, then Open again. Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once.
+- **Windows**: run the `.exe` - there is nothing to install. If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**.
 
 #### 2. Prepare the controller
 Make sure at least one waypoint mission is already saved in DJI Fly.
@@ -314,6 +314,7 @@ macOS only lets one program talk to the controller at a time, and Preview being 
 The app checks for these when a scan fails and names whichever one is running.
 
 #### 3. Transfer
+Keep each mission's `.jpg` preview next to its `.kmz` - the planner's download includes it - and the app puts it on the controller as that mission's thumbnail.
 Press **Choose .kmz...** for a single mission, or **Choose folder...** to pick from a folder you have been saving missions into.
 Then press **Scan controller**, choose a slot, and press **Transfer to controller**.
 

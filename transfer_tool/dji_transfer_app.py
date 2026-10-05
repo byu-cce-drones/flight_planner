@@ -56,6 +56,10 @@ THUMB_COLUMN_WIDTH = THUMB_MAX_WIDTH + 16
 # Enough for the slot number and nothing more; the rest goes to the preview.
 SLOT_COLUMN_WIDTH = 150
 WINDOW_TITLE = "DJI Fly Mission Transfer"
+MIN_WIDTH = 620
+# Tall enough to show a few slots at once - used whenever the screen allows.
+PREFERRED_HEIGHT = 700
+WINDOW_CHROME_HEIGHT = 40
 
 
 class TransferApp:
@@ -71,8 +75,8 @@ class TransferApp:
         self._thumbnails = []
 
         root.title(WINDOW_TITLE)
-        root.minsize(620, 700)
         self._build_ui()
+        self._fit_to_screen()
         self._check_backend()
         self.root.after(100, self._drain_events)
 
@@ -133,14 +137,18 @@ class TransferApp:
 
         # Said up front rather than only in the error, because the error
         # arrives after the confusion: macOS lets exactly one program hold the
-        # controller, and the resulting failure names none of them.
-        ttk.Label(
-            step2,
-            text=(
+        # controller, and the resulting failure names none of them. Windows
+        # shares the device between programs, so it needs no such warning.
+        if sys.platform == "darwin":
+            before_scanning = (
                 "Before scanning: quit Preview, Photos, and Image Capture. macOS lets only\n"
                 "one program talk to the controller, and these grab it automatically.\n"
-                "Controller Support: RC 2. RC does not work. RC Pro untested."
-            ),
+            )
+        else:
+            before_scanning = "Before scanning: plug in the controller and switch it on.\n"
+        ttk.Label(
+            step2,
+            text=before_scanning + "Controller Support: RC 2. RC does not work. RC Pro untested.",
             foreground="grey", justify="left",
         ).pack(anchor="w", padx=12, pady=(0, 6))
 
@@ -151,8 +159,12 @@ class TransferApp:
 
         holder = ttk.Frame(step2)
         holder.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        # A small natural height, in rows. The list expands to fill whatever
+        # the window has anyway; left at Tk's default of 10 thumbnail-height
+        # rows it asks for ~1400px, more than a laptop screen has, and the
+        # window opens with the Transfer button pushed off the bottom.
         self.tree = ttk.Treeview(
-            holder, style="Nests.Treeview", columns=("slot",),
+            holder, style="Nests.Treeview", columns=("slot",), height=2,
             show="tree headings" if PIL_AVAILABLE else "headings", selectmode="browse",
         )
         self.tree.heading("slot", text="Slot")
@@ -163,6 +175,40 @@ class TransferApp:
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._refresh_transfer_button())
+
+    def _fit_to_screen(self):
+        """
+        Open at the preferred size, but never taller than the screen has room for.
+
+        The common Windows laptop - 1080p at 150% scaling - leaves under 700px
+        above the taskbar, so a fixed 700px minimum put the Transfer button
+        underneath the taskbar with no way to shrink the window to reach it.
+        """
+        top, usable = self._work_area()
+        # Title bar and frame, which the requested height doesn't include.
+        room = usable - WINDOW_CHROME_HEIGHT
+        height = min(PREFERRED_HEIGHT, room)
+        self.root.minsize(MIN_WIDTH, height)
+        self.root.update_idletasks()
+        width = max(MIN_WIDTH, self.root.winfo_reqwidth())
+        x = max(0, (self.root.winfo_screenwidth() - width) // 2)
+        y = top + max(0, (room - height) // 2)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _work_area(self):
+        """(top, height) of the screen area not covered by the taskbar/menu bar."""
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                rect = wintypes.RECT()
+                SPI_GETWORKAREA = 0x0030
+                if ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+                    return rect.top, rect.bottom - rect.top
+            except Exception:
+                core.logger.exception("could not read the work area")
+        # Elsewhere Tk only knows the whole screen; allow for a menu bar/dock.
+        return 0, self.root.winfo_screenheight() - 80
 
     def _check_backend(self):
         """Say up front if this machine can't talk to a controller at all."""
