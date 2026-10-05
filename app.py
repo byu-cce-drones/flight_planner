@@ -6079,275 +6079,56 @@ elif page == 'Photo Sorter':
     # BATCH TRANSFER MODE
     # ==========================================
 elif page == 'DJI Fly Transfer':
+    # CLASS FORK: upstream's version of this tab drives the controller over USB
+    # from whatever machine is running Streamlit. Served to a browser that is
+    # the wrong machine entirely - a browser has no USB access, so every
+    # control on the original tab acted on the server rather than on the
+    # student's own computer. The tab is therefore a download page for the
+    # desktop helper, which is the half of the job a browser genuinely cannot
+    # do. Keep this block self-contained: it is the one place this fork
+    # deliberately diverges from upstream, and merges from upstream are much
+    # easier when the divergence is a single contiguous region.
+    TRANSFER_APP_REPO = "https://github.com/byu-cce-drones/flight_planner"
+    # /releases/latest/ follows whatever the newest release is, so publishing a
+    # new build never requires editing this file again.
+    TRANSFER_APP_MAC_URL = (
+        f"{TRANSFER_APP_REPO}/releases/latest/download/DJI-Fly-Mission-Transfer-mac.zip"
+    )
+
     with st.container(key="page_body"):
-        st.header("DJI Fly Batch Mission Transfer")
-        st.write("Assign local flight plans (left) to overwrite existing missions on the RC 2 (right).")
-    
-        if 'rc_nests' not in st.session_state:
-            st.session_state.rc_nests = {}
-            st.session_state.preview_id = None
-            st.session_state.rc_scan_error = None
+        st.header("DJI Fly Mission Transfer")
+        st.write(
+            "Missions move onto the controller with a small desktop app, not from this "
+            "page - a web browser cannot reach USB. Plan the mission here, download the "
+            "`.kmz`, then push it to the controller with the app below."
+        )
 
-        col1, col2 = st.columns(2)
-    
-        if "batch_browsed_dir" not in st.session_state:
-            st.session_state.batch_browsed_dir = None
+        st.subheader("1. Get the app")
+        st.link_button(
+            "Download for macOS", TRANSFER_APP_MAC_URL, width='stretch', type="primary",
+        )
+        st.caption(
+            "Unzip it, then the first time **right-click the app and choose Open**, then "
+            "Open again. Double-clicking refuses with \"unidentified developer\" or "
+            "\"damaged\" until you have done that once, because the app is not signed."
+        )
+        st.info("A Windows version is not available yet.")
 
-        def _clear_batch_browsed_dir():
-            st.session_state.batch_browsed_dir = None
-
-        with col1:
-            st.subheader("1. Source Missions")
-            existing_dirs = [d for d in os.listdir(MISSION_DIR) if os.path.isdir(os.path.join(MISSION_DIR, d)) and d != ".cache"]
-            dir_col, browse_col = st.columns([5, 1])
-            with dir_col:
-                selected_dir_name = st.selectbox("Select Local Folder", ["Root (missions/)"] + existing_dirs, key="batch_dir", on_change=_clear_batch_browsed_dir)
-            with browse_col:
-                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                if st.button("📂", key="batch_btn_browse_dir", help="Browse for a mission directory outside missions/"):
-                    picked = pick_folder_dialog("Select Mission Directory")
-                    if picked:
-                        st.session_state.batch_browsed_dir = picked
-                        st.rerun()
-
-            if st.session_state.batch_browsed_dir:
-                active_dir = st.session_state.batch_browsed_dir
-                dir_label = active_dir
-                st.caption(f"📁 Browsing: {active_dir}")
-            else:
-                active_dir = MISSION_DIR if selected_dir_name == "Root (missions/)" else os.path.join(MISSION_DIR, selected_dir_name)
-                dir_label = selected_dir_name
-
-            # This page is DJI Fly-only (MTP transfer to the RC 2's dummy mission
-            # slots doesn't apply to DJI Pilot missions), so Pilot-format .kmz
-            # files are filtered out rather than just listed alongside Fly ones.
-            try:
-                kmz_files = [
-                    f for f in os.listdir(active_dir)
-                    if is_kmz_file(f) and is_dji_fly_kmz(os.path.join(active_dir, f))
-                ]
-            except OSError as e:
-                st.error(f"Can't read {dir_label}: {e.strerror or e}")
-                kmz_files = []
-
-            if not kmz_files:
-                st.warning(f"No DJI Fly missions found in {dir_label}.")
-            else:
-                st.info(f"Found {len(kmz_files)} missions ready for transfer.")
-            
-        with col2:
-            st.subheader("2. Controller Nests")
-            st.write("Connect the RC 2 via USB, power on, and close Preview and Android File Transfer.")
-            if st.button("🔄 Scan RC 2 & Pull Previews", width='stretch'):
-                with st.spinner("Scanning MTP and downloading thumbnails... (This takes a few seconds)"):
-                    st.session_state.rc_nests, st.session_state.preview_id, st.session_state.rc_scan_error = fetch_controller_nests_and_previews()
-
-            if st.session_state.rc_nests:
-                st.success(f"Found {len(st.session_state.rc_nests)} authorized mission slots.")
-            elif st.session_state.rc_scan_error:
-                st.error(f"Scan failed: {st.session_state.rc_scan_error}")
-                st.caption("Full details (with traceback) were printed to the terminal streamlit was launched from.")
-            else:
-                st.warning("No controller connected, or no dummy missions found.")
-                st.warning("If controller is connected, make sure preview app is closed.")
-
-        st.write("---")
-    
-        # --- The Visual Mapping UI ---
-        if kmz_files and st.session_state.rc_nests:
-            st.subheader("3. Assign & Transfer")
-        
-            max_rows = max(len(kmz_files), len(st.session_state.rc_nests))
-            num_rows = st.number_input("Number of missions to assign", min_value=1, max_value=max_rows, value=min(3, max_rows))
-        
-            transfer_map = {}
-
-            # Header formatting
-            h1, h2, h3 = st.columns([4, 1, 4])
-            h1.markdown("**Local Mission** (What to push)")
-            h3.markdown("**Controller Target** (What will be overwritten)")
-
-            # Dynamic Visual Rows
-            # Once a local mission or nest is picked in one row, it's excluded from
-            # the other rows' dropdowns - keeps the lists shrinking as you assign,
-            # instead of showing already-used options, so it's easier to work
-            # through what's left.
-            #
-            # This is done in two passes: first resolve what each row's value
-            # will be (keeping any value the user already explicitly set, and
-            # picking sensible non-overlapping defaults for the rest against a
-            # shrinking pool), then render each row's dropdown with exclusions
-            # computed from that fully-resolved picture. Reading st.session_state
-            # naively mid-loop instead would mix fresh values (for rows already
-            # rendered this run) with stale, previous-run values (for rows not
-            # yet reached) - and on first load, before any row has a value at
-            # all, would produce no exclusions whatsoever.
-            def _resolve_row_values(all_options, session_key_prefix, placeholder):
-                remaining = list(all_options)
-                resolved = {}
-                for j in range(int(num_rows)):
-                    state_key = f"{session_key_prefix}{j}"
-                    if state_key in st.session_state:
-                        # This row has already been rendered before, even if the
-                        # user has since cleared it back to the placeholder -
-                        # respect that as an intentional "nothing assigned here"
-                        # rather than auto-filling it from the remaining pool,
-                        # which would keep it (and whatever got auto-filled)
-                        # wrongly excluded from every other row's options.
-                        existing = st.session_state[state_key]
-                        resolved[j] = existing if (existing == placeholder or existing in remaining) else placeholder
-                    elif remaining:
-                        resolved[j] = remaining[0]
-                    else:
-                        resolved[j] = placeholder
-                    if resolved[j] in remaining:
-                        remaining.remove(resolved[j])
-                return resolved
-
-            resolved_locs = _resolve_row_values(kmz_files, "loc_", "--- Select Local Mission ---")
-            resolved_nests = _resolve_row_values(list(st.session_state.rc_nests.keys()), "nest_", "--- Select Target Nest ---")
-
-            for i in range(int(num_rows)):
-                st.markdown(f"**Assignment {i+1}**")
-                row_c1, row_c2, row_c3 = st.columns([4, 1, 4])
-
-                chosen_locs_elsewhere = {v for j, v in resolved_locs.items() if j != i} - {"--- Select Local Mission ---"}
-                chosen_nests_elsewhere = {v for j, v in resolved_nests.items() if j != i} - {"--- Select Target Nest ---"}
-
-                row_local_options = ["--- Select Local Mission ---"] + [
-                    k for k in kmz_files if k not in chosen_locs_elsewhere
-                ]
-                row_nest_options = ["--- Select Target Nest ---"] + [
-                    n for n in st.session_state.rc_nests.keys() if n not in chosen_nests_elsewhere
-                ]
-
-                with row_c1:
-                    default_loc = row_local_options.index(resolved_locs[i]) if resolved_locs[i] in row_local_options else 0
-                    loc_choice = st.selectbox(f"Local {i}", row_local_options, index=default_loc, key=f"loc_{i}", label_visibility="collapsed")
-
-                    # Show Local Preview Image
-                    if loc_choice != "--- Select Local Mission ---":
-                        local_jpg = os.path.join(active_dir, kmz_companion_path(loc_choice))
-                        if os.path.exists(local_jpg):
-                            st.image(local_jpg, width='stretch')
-                        else:
-                            st.info("No custom title card generated.")
-
-                with row_c2:
-                    # Add a visual arrow pointing from local to remote
-                    st.markdown("<h1 style='text-align: center; color: gray; margin-top: 40px;'>➔</h1>", unsafe_allow_html=True)
-
-                with row_c3:
-                    default_nest = row_nest_options.index(resolved_nests[i]) if resolved_nests[i] in row_nest_options else 0
-                    nest_choice = st.selectbox(f"Nest {i}", row_nest_options, index=default_nest, key=f"nest_{i}", label_visibility="collapsed")
-                
-                    # Show Cached Controller Preview Image
-                    if nest_choice != "--- Select Target Nest ---":
-                        cached_jpg = os.path.join("missions/.cache", f"{nest_choice}.jpg")
-                        if os.path.exists(cached_jpg):
-                            st.image(cached_jpg, width='stretch', caption=f"Current: {nest_choice[-8:]}")
-                        else:
-                            st.info("Native Dummy Mission\n\n*(Preview unreadable over USB until overridden)*")
-                
-                if loc_choice != "--- Select Local Mission ---" and nest_choice != "--- Select Target Nest ---":
-                    transfer_map[loc_choice] = nest_choice
-            
-                st.write("---")
-                    
-            if st.button("🚀 Execute Visual Transfer", width='stretch'):
-                if not transfer_map:
-                    st.warning("No valid pairs assigned! Select a local mission and a target nest.")
-                else:
-                    st.session_state.last_transfer_checklist = []  # reset for this batch
-
-                    progress_bar = st.progress(0, text="Initializing transfer...")
-                    total_tasks = len(transfer_map)
-                    completed = 0
-
-                    for kmz_name, target_uuid in transfer_map.items():
-                        local_path = os.path.join(active_dir, kmz_name)
-                        target_folder_id = st.session_state.rc_nests[target_uuid]
-
-                        progress_bar.progress(completed / total_tasks, text=f"Transferring {kmz_name}...")
-
-                        # Call the MTP helper we updated earlier
-                        success, error_msg = push_mission_to_nest(local_path, target_uuid)
-
-                        if success:
-                            st.success(f"✅ Transferred **{kmz_name}** into slot `{target_uuid}`")
-                            st.session_state.last_transfer_checklist.append((kmz_name, target_uuid))
-                        else:
-                            st.error(f"❌ Failed to transfer **{kmz_name}**: {error_msg}")
-
-                        completed += 1
-                        time.sleep(1.5) # Let the Android File System breathe
-
-                    progress_bar.progress(1.0, text="Batch transfer complete!")
-
-            # DJI Fly caches each mission's thumbnail privately and won't pick up a
-            # newly-pushed one on its own - not even after a full power cycle (see
-            # session notes). Opening a mission in DJI Fly and saving it once is
-            # the only thing that's been found to force a refresh, so surface a
-            # checklist of exactly what was just transferred rather than leaving
-            # the user to remember on their own.
-            if st.session_state.get("last_transfer_checklist"):
-                # The flight log should reflect what's actually on the
-                # controller now, not every KMZ sitting in the source folder
-                # (that folder can hold missions from unrelated batches, old
-                # tests, etc.) - so it only appears once there's a completed
-                # transfer to draw from, and uses that same checklist as its
-                # mission list rather than re-scanning active_dir.
-                transferred_kmz_names = [kmz_name for kmz_name, target_uuid in st.session_state.last_transfer_checklist]
-
-                st.write("---")
-                if st.button("⬇️ Download Flight Log", width='stretch',
-                             help="Generates a flight-log spreadsheet pre-filled with the missions just transferred above."):
-                    if not st.session_state.pilot_name.strip():
-                        st.warning("Set your pilot name using the 🪪 Pilot button in the header before downloading a flight log.")
-                    else:
-                        log_progress = st.progress(0, text="Looking up mission locations...")
-
-                        def _log_progress(i, total, fname):
-                            log_progress.progress(i / total, text=f"Looking up {fname}...")
-
-                        rows = gather_flight_log_rows(active_dir, transferred_kmz_names, progress=_log_progress)
-                        log_progress.progress(1.0, text="Building spreadsheet...")
-
-                        wb = build_flight_log_workbook(rows, st.session_state.pilot_name, st.session_state.pilot_cert)
-
-                        pilot_component = sanitize_filename_component(st.session_state.pilot_name).replace(" ", "_")
-                        folder_component = sanitize_filename_component(os.path.basename(os.path.normpath(active_dir)) or "missions")
-                        count = next_flight_log_count(active_dir)
-                        log_filename = f"Flight_Log_{pilot_component}_{folder_component}_{count}.xlsx"
-                        log_path = os.path.join(FLIGHT_LOG_DIR, log_filename)
-                        wb.save(log_path)
-
-                        log_progress.empty()
-                        st.success(f"Saved **{log_filename}** to the local `{FLIGHT_LOG_DIR}/` folder with {len(rows)} mission(s) pre-filled.")
-                        with open(log_path, "rb") as f:
-                            st.download_button(
-                                "💾 Save a copy from the browser", f.read(), file_name=log_filename,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key="dl_flight_log",
-                            )
-
-                st.write("---")
-                st.subheader("📋 Manual Thumbnail Refresh Checklist")
-                st.info(
-                    "DJI Fly caches each mission's thumbnail privately and won't pick up "
-                    "the new one automatically - not even after a full power cycle. Open "
-                    "each mission below in DJI Fly and save it once to force its "
-                    "thumbnail to refresh on the controller. The picture shown is what that "
-                    "mission currently still looks like on the controller's screen (the UUID "
-                    "itself isn't visible there), so you can spot the right one in DJI Fly's list."
-                )
-                for kmz_name, target_uuid in st.session_state.last_transfer_checklist:
-                    check_col1, check_col2 = st.columns([1, 5])
-                    with check_col1:
-                        cached_jpg = os.path.join("missions/.cache", f"{target_uuid}.jpg")
-                        if os.path.exists(cached_jpg):
-                            st.image(cached_jpg, width=1600)
-                        else:
-                            st.caption("(no preview cached - scan the RC 2 to fetch one)")
-                    with check_col2:
-                        st.checkbox(f"{kmz_name} → `{target_uuid}`", key=f"refresh_check_{target_uuid}")
+        st.subheader("2. Use it")
+        st.markdown(
+            "1. In DJI Fly on the controller, make sure **at least one waypoint mission is "
+            "saved**. The app overwrites a mission slot, so there has to be one to "
+            "overwrite - two points in a parking lot is enough.\n"
+            "2. **Quit Preview, Photos, and Image Capture** on a Mac. macOS lets only one "
+            "program talk to the controller, and Preview being open by itself is enough to "
+            "block the transfer.\n"
+            "3. Plug the controller into the computer and switch it on.\n"
+            "4. In the app: **Choose .kmz...** (or **Choose folder...** to pick from a "
+            "folder of missions), then **Scan controller**, pick a slot, then **Transfer "
+            "to controller**. The preview picture shows the mission currently in each "
+            "slot, so you can see what you are about to replace.\n"
+            "5. Open the mission list in DJI Fly. If the mission is not there, back out of "
+            "the list and open it again. Load it, back out to the mission history page, "
+            "and press save."
+        )
+        st.caption("Controller Support: RC 2. RC does not work. RC Pro untested.")
