@@ -2191,24 +2191,24 @@ def default_group_folder_name(index, group):
     return f"Group_{index + 1}_{group_start_datetime}"
 
 
-def find_photo_groups(source_folder, target_date, gap_minutes=5):
+def find_photo_groups(source_folder, target_date, gap_minutes=5, progress=None):
     """
     Scans source_folder for images taken on target_date and splits them into
     groups wherever the gap between two sequential photos exceeds
     gap_minutes. Read-only - nothing is copied or created on disk here, so
     this can run on its own as a preview step before the user decides how
     (or whether) to name each group.
+
+    `progress`, if given, is called with (done, total, filename) as the scan
+    walks the folder - reading EXIF off a few hundred photos takes real time.
+    Raises OSError if source_folder can't be read, and returns [] when nothing
+    in it was taken on target_date; saying so is the caller's job, because
+    this runs under both a Streamlit page and a desktop window.
     """
     valid_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
 
     image_data = []
-    try:
-        files = os.listdir(source_folder)
-    except Exception as e:
-        st.error(f"Error accessing source directory: {e}")
-        return []
-
-    progress_bar = st.progress(0, text="Scanning files for EXIF data...")
+    files = os.listdir(source_folder)
 
     for i, filename in enumerate(files):
         ext = os.path.splitext(filename)[1].lower()
@@ -2219,12 +2219,10 @@ def find_photo_groups(source_folder, target_date, gap_minutes=5):
             if taken_time and taken_time.date() == target_date:
                 image_data.append({'path': filepath, 'name': filename, 'time': taken_time})
 
-        progress_bar.progress((i + 1) / len(files), text=f"Scanning files... ({i+1}/{len(files)})")
-
-    progress_bar.empty()
+        if progress:
+            progress(i + 1, len(files), filename)
 
     if not image_data:
-        st.warning(f"No images found for {target_date.strftime('%Y-%m-%d')} in the source folder.")
         return []
 
     image_data.sort(key=lambda x: x['time'])
@@ -2244,21 +2242,30 @@ def find_photo_groups(source_folder, target_date, gap_minutes=5):
     if current_group:
         groups.append(current_group)
 
-    st.info(f"Found {len(groups)} distinct flight groups.")
     return groups
 
 
-def copy_photo_groups(groups, output_folder, group_names=None):
+def _sorted_photos_message(copied, groups, output_folder):
+    """What the page says after a sort, now that copy_photo_groups is silent."""
+    return (f"Successfully sorted {copied} images into {len(groups)} folders "
+            f"at '{output_folder}'.")
+
+
+def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
     """
     Copies each group's photos into its own folder under output_folder.
     group_names, if given, supplies one folder name per group (already
     sanitized/deduped by the caller) - any entry that's falsy falls back to
     that group's default auto-generated name, same as the fully automatic
     path uses for all of them.
+
+    `progress`, if given, is called with (copied, total) after each file.
+    Returns the number of images copied, for the caller to report; copying a
+    full outing moves gigabytes, so neither the count nor the progress is
+    something to leave to a print statement.
     """
     os.makedirs(output_folder, exist_ok=True)
 
-    copy_progress = st.progress(0, text="Copying images to group folders...")
     total_images = sum(len(g) for g in groups)
     copied = 0
 
@@ -2272,10 +2279,10 @@ def copy_photo_groups(groups, output_folder, group_names=None):
             target_path = os.path.join(folder_path, img['name'])
             shutil.copy2(img['path'], target_path)
             copied += 1
-            copy_progress.progress(copied / total_images, text=f"Copying images... ({copied}/{total_images})")
+            if progress:
+                progress(copied, total_images)
 
-    copy_progress.empty()
-    st.success(f"Successfully sorted {total_images} images into {len(groups)} folders at '{output_folder}'.")
+    return copied
 
 # ==========================================
 # 3D ROTATION MATRIX FOOTPRINT CALCULATOR
@@ -4683,7 +4690,13 @@ with st.container(key="app_header"):
     with header_title_col:
         st.markdown("# Flight Planner")
     with header_tabs_col:
-        page = st.radio("Navigation", ["Creator", "Editor", "Viewer  |", "Photo Sorter", "DJI Fly Transfer"], horizontal=True, label_visibility="collapsed")
+        # No Photo Sorter tab on this fork: it sorts folders on whatever machine
+        # runs the app, which here is the server - it offered every visitor a
+        # view of /home/appuser and a button that would act on it. The desktop
+        # app does that job now, and the tab below hands the app out. The page
+        # block itself is left in place, unreachable, so merges from upstream
+        # stay small; deleting it would conflict on every one.
+        page = st.radio("Navigation", ["Creator", "Editor", "Viewer  |", "DJI Fly Transfer & Photo Sorter"], horizontal=True, label_visibility="collapsed")
     if header_download_col is not None:
         with header_download_col:
             if st.button("⬇️ Download", width='stretch', key="header_download_missions",
@@ -6427,15 +6440,40 @@ elif page == 'Photo Sorter':
                 st.error("Please provide an output directory.")
             else:
                 with st.spinner("Scanning for photo groups..."):
-                    groups = find_photo_groups(source_dir, target_date, gap_minutes)
+                    scan_progress = st.progress(0, text="Scanning files for EXIF data...")
+                    try:
+                        groups = find_photo_groups(
+                            source_dir, target_date, gap_minutes,
+                            progress=lambda done, total, name: scan_progress.progress(
+                                done / total, text=f"Scanning files... ({done}/{total})"),
+                        )
+                    except OSError as e:
+                        scan_progress.empty()
+                        st.error(f"Error accessing source directory: {e}")
+                        groups = []
+                    else:
+                        scan_progress.empty()
+                        if groups:
+                            st.info(f"Found {len(groups)} distinct flight groups.")
+                        else:
+                            st.warning(
+                                f"No images found for {target_date.strftime('%Y-%m-%d')} "
+                                "in the source folder."
+                            )
                 if manual_naming:
                     # Stashed for the naming review below rather than sorted
                     # immediately - copying only happens once the user hits
                     # "Create Folders" there.
                     st.session_state.sorter_groups = groups
                 elif groups:
-                    with st.spinner("Sorting photos..."):
-                        copy_photo_groups(groups, output_dir)
+                    copy_progress = st.progress(0, text="Copying images to group folders...")
+                    copied = copy_photo_groups(
+                        groups, output_dir,
+                        progress=lambda done, total: copy_progress.progress(
+                            done / total, text=f"Copying images... ({done}/{total})"),
+                    )
+                    copy_progress.empty()
+                    st.success(_sorted_photos_message(copied, groups, output_dir))
 
         if manual_naming and st.session_state.sorter_groups:
             groups = st.session_state.sorter_groups
@@ -6478,14 +6516,21 @@ elif page == 'Photo Sorter':
                 if duplicates:
                     st.error(f"These group names are used more than once - make each one unique: {', '.join(duplicates)}")
                 else:
-                    with st.spinner("Sorting photos..."):
-                        copy_photo_groups(groups, st.session_state.sorter_output, final_names)
+                    copy_progress = st.progress(0, text="Copying images to group folders...")
+                    copied = copy_photo_groups(
+                        groups, st.session_state.sorter_output, final_names,
+                        progress=lambda done, total: copy_progress.progress(
+                            done / total, text=f"Copying images... ({done}/{total})"),
+                    )
+                    copy_progress.empty()
+                    st.success(_sorted_photos_message(
+                        copied, groups, st.session_state.sorter_output))
                     st.session_state.sorter_groups = []
 
     # ==========================================
     # BATCH TRANSFER MODE
     # ==========================================
-elif page == 'DJI Fly Transfer':
+elif page == 'DJI Fly Transfer & Photo Sorter':
     # CLASS FORK: upstream's version of this tab drives the controller over USB
     # from whatever machine is running Streamlit. Served to a browser that is
     # the wrong machine entirely - a browser has no USB access, so every
@@ -6506,11 +6551,13 @@ elif page == 'DJI Fly Transfer':
     )
 
     with st.container(key="page_body"):
-        st.header("DJI Fly Mission Transfer")
+        st.header("DJI Fly Mission Transfer & Photo Sorter")
         st.write(
-            "Missions move onto the controller with a small desktop app, not from this "
-            "page - a web browser cannot reach USB. Plan the mission here, download the "
-            "`.kmz`, then push it to the controller with the app below."
+            "The two jobs that touch your own computer happen in one small desktop app, "
+            "not on this page - a browser can't reach USB, and your photos are on your "
+            "card rather than on this server. Plan the mission here, download the `.kmz`, "
+            "then use the app to put it on the controller and to sort the photos "
+            "afterwards."
         )
 
         st.subheader("1. Get the app")
@@ -6552,3 +6599,13 @@ elif page == 'DJI Fly Transfer':
             "and press save."
         )
         st.caption("Controller Support: RC 2. RC does not work. RC Pro untested.")
+
+        st.subheader("3. Sort the photos afterwards")
+        st.markdown(
+            "The app's **Sort photos** tab splits an outing's card into one folder per "
+            "flight, using the gaps between shots - so keep **30 seconds** between "
+            "flights or two of them land in the same folder.\n\n"
+            "Point it at the folder your photos are in, say where the new folders should "
+            "go and which date you flew, then press **Find flights** to see what it will "
+            "create before anything is copied. Your originals are copied, never moved."
+        )

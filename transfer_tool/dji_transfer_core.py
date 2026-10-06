@@ -8,6 +8,8 @@ planner (or, once frozen, a Python install at all):
   get_mtp_session_class()                - the backend for this OS, or None
   fetch_controller_nests_and_previews()  - scan the controller for slots
   push_mission_to_nest(kmz_path, uuid)   - write one mission into a slot
+  find_photo_groups(folder, date, gap)   - split an outing's photos by time
+  copy_photo_groups(groups, out)         - copy each group into its own folder
 
 GENERATED FILE - do not hand-edit. Fix app.py, then re-run build_core.py.
 `python build_core.py --check` verifies this copy still matches app.py.
@@ -21,7 +23,13 @@ import ctypes
 import ctypes.util
 import platform
 import logging
+import shutil
 import subprocess
+from datetime import datetime, timedelta
+
+# Pillow reads the EXIF timestamps the photo sorter groups by. It is also
+# what the mission previews need, so a build without it was already degraded.
+from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dji_fly_transfer")
@@ -1042,3 +1050,115 @@ def push_mission_to_nest(local_kmz_path, target_uuid):
         # as a normal failure instead.
         logger.exception("Unexpected error while pushing %s to nest %s", local_kmz_path, target_uuid)
         return False, f"Unexpected error: {type(e).__name__}: {e}"
+
+
+def get_exif_datetime(filepath):
+    """Extracts the exact time the photo was taken from EXIF data."""
+    try:
+        with Image.open(filepath) as img:
+            exif = img._getexif()
+            if not exif:
+                return None
+            for tag, value in exif.items():
+                if tag == 36867: 
+                    return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        pass
+    return None
+
+
+def default_group_folder_name(index, group):
+    """The auto-generated folder name for one group - shared by the fully
+    automatic sort and as the pre-filled default when naming groups by hand,
+    so a name left untouched in the review UI produces the identical folder
+    name the automatic path would have used."""
+    group_start_datetime = group[0]['time'].strftime("%Y-%m-%d_%H-%M-%S")
+    return f"Group_{index + 1}_{group_start_datetime}"
+
+
+def find_photo_groups(source_folder, target_date, gap_minutes=5, progress=None):
+    """
+    Scans source_folder for images taken on target_date and splits them into
+    groups wherever the gap between two sequential photos exceeds
+    gap_minutes. Read-only - nothing is copied or created on disk here, so
+    this can run on its own as a preview step before the user decides how
+    (or whether) to name each group.
+
+    `progress`, if given, is called with (done, total, filename) as the scan
+    walks the folder - reading EXIF off a few hundred photos takes real time.
+    Raises OSError if source_folder can't be read, and returns [] when nothing
+    in it was taken on target_date; saying so is the caller's job, because
+    this runs under both a Streamlit page and a desktop window.
+    """
+    valid_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+
+    image_data = []
+    files = os.listdir(source_folder)
+
+    for i, filename in enumerate(files):
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in valid_extensions:
+            filepath = os.path.join(source_folder, filename)
+            taken_time = get_exif_datetime(filepath)
+
+            if taken_time and taken_time.date() == target_date:
+                image_data.append({'path': filepath, 'name': filename, 'time': taken_time})
+
+        if progress:
+            progress(i + 1, len(files), filename)
+
+    if not image_data:
+        return []
+
+    image_data.sort(key=lambda x: x['time'])
+
+    groups = []
+    current_group = [image_data[0]]
+    gap_threshold = timedelta(minutes=gap_minutes)
+
+    for i in range(1, len(image_data)):
+        time_diff = image_data[i]['time'] - image_data[i-1]['time']
+        if time_diff <= gap_threshold:
+            current_group.append(image_data[i])
+        else:
+            groups.append(current_group)
+            current_group = [image_data[i]]
+
+    if current_group:
+        groups.append(current_group)
+
+    return groups
+
+
+def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
+    """
+    Copies each group's photos into its own folder under output_folder.
+    group_names, if given, supplies one folder name per group (already
+    sanitized/deduped by the caller) - any entry that's falsy falls back to
+    that group's default auto-generated name, same as the fully automatic
+    path uses for all of them.
+
+    `progress`, if given, is called with (copied, total) after each file.
+    Returns the number of images copied, for the caller to report; copying a
+    full outing moves gigabytes, so neither the count nor the progress is
+    something to leave to a print statement.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+
+    total_images = sum(len(g) for g in groups)
+    copied = 0
+
+    for i, group in enumerate(groups):
+        folder_name = (group_names[i] if group_names else None) or default_group_folder_name(i, group)
+        folder_path = os.path.join(output_folder, folder_name)
+
+        os.makedirs(folder_path, exist_ok=True)
+
+        for img in group:
+            target_path = os.path.join(folder_path, img['name'])
+            shutil.copy2(img['path'], target_path)
+            copied += 1
+            if progress:
+                progress(copied, total_images)
+
+    return copied
