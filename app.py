@@ -1299,50 +1299,28 @@ def export_mission_kmz_from_strings(template_kml_str, waylines_wpml_str, output_
             if waylines_wpml_str:
                 kmz.writestr('waylines.wpml', waylines_wpml_str)
 
-def offer_kmz_download(container, scope, filepath=None, filename=None):
+def remember_saved_kmz(filepath, filename):
     """
-    "Download missions" button for one Creator/Editor flow, so saved missions
-    actually leave the server rather than only existing in a folder no one
-    but the app itself can reach. It opens _download_missions_dialog, which
-    lets the student take one mission or a whole folder, and choose where it
-    goes; the most recently saved mission in this flow is preselected there.
+    Note the mission a save flow just wrote, so the header's Download button
+    opens its dialog with that mission already selected.
 
-    Only renders in MULTI_USER_MODE. Locally, the save folder IS the user's
-    own missions/ directory - they're already looking straight at the file in
-    Finder/Explorer, so a second copy offered through the browser's download
-    flow is pure redundancy. In multi-user mode it's the only way a saved
-    mission gets onto a student's own computer at all - there's no
-    filesystem for them to browse to, and once their tab closes the
-    session's mission folder is gone for good (see MULTI_USER_MODE above
-    generate_mapping_flight_path's session_id block). A no-op call is cheap
-    enough that every save flow can call this unconditionally rather than
-    each needing its own MULTI_USER_MODE check.
+    Only meaningful in MULTI_USER_MODE. Locally the save folder IS the user's
+    own missions/ directory - they are already looking straight at the file in
+    Finder/Explorer, so there is nothing for the browser to hand back. In
+    multi-user mode this is the only way a saved mission reaches a student's
+    own computer at all: there is no filesystem for them to browse to, and
+    once their tab closes the session's mission folder is gone for good (see
+    MULTI_USER_MODE above generate_mapping_flight_path's session_id block).
 
-    Pass filepath/filename right after a successful save to remember it;
-    call with just (container, scope) on every other render to redraw the
-    same button. That split is needed because st.button/this whole save
-    branch only evaluates True on the exact rerun the click happened on - a
-    download button placed only inside that branch would vanish again the
-    instant the user touched anything else, which defeats the purpose for a
-    student who saves a mission and then, say, nudges the altitude field
-    before remembering to grab the file. Once anything has been saved this
-    session the button stays, in every flow - a student who saves into a
-    folder from the Creator can still fetch the whole folder later.
+    Recording only - the button itself lives in the app header, where it is
+    reachable from every tab and does not come and go with whatever was last
+    clicked. A button rendered inside a save branch would vanish the instant
+    the student touched anything else, which is exactly when they tend to
+    remember they still need the file.
     """
     if not MULTI_USER_MODE:
         return
-    key = f"_last_saved_kmz_{scope}"
-    if filepath is not None:
-        # Record only. Every save flow follows this with the plain redraw
-        # call, and drawing here too put two widgets with the same key on the
-        # page on the rerun where Save was clicked.
-        st.session_state[key] = {"path": filepath, "name": filename}
-        return
-    if not any(_downloadable_missions().values()):
-        return
-    if container.button("⬇️ Download missions...", key=f"dl_{scope}", width='stretch', type="primary"):
-        saved = st.session_state.get(key)
-        _download_missions_dialog(saved["path"] if saved else None)
+    st.session_state["_last_saved_kmz"] = {"path": filepath, "name": filename}
 
 
 # Shown in place of a subfolder's name for missions saved straight into the
@@ -4508,11 +4486,27 @@ def _pilot_info_dialog():
 
 
 with st.container(key="app_header"):
-    header_title_col, header_tabs_col, header_pilot_col, header_readme_col = st.columns([1, 4, 0.6, 0.6], gap="medium")
+    # The Download button only exists on the hosted version, where saved
+    # missions are stranded on the server - locally the student already has
+    # the file. Its column is left out entirely rather than rendered empty,
+    # so the local header keeps its original spacing.
+    # Wider than its neighbours: "Download" is a long word, and at 0.6 it wraps
+    # mid-word inside the button.
+    header_cols = [1, 4] + ([1.0] if MULTI_USER_MODE else []) + [0.6, 0.6]
+    header_columns = st.columns(header_cols, gap="medium")
+    header_title_col, header_tabs_col = header_columns[0], header_columns[1]
+    header_download_col = header_columns[2] if MULTI_USER_MODE else None
+    header_pilot_col, header_readme_col = header_columns[-2], header_columns[-1]
     with header_title_col:
         st.markdown("# Flight Planner")
     with header_tabs_col:
         page = st.radio("Navigation", ["Creator", "Editor", "Viewer  |", "Photo Sorter", "DJI Fly Transfer"], horizontal=True, label_visibility="collapsed")
+    if header_download_col is not None:
+        with header_download_col:
+            if st.button("⬇️ Download", width='stretch', key="header_download_missions",
+                         help="Save missions to your computer - one mission or a whole folder"):
+                saved = st.session_state.get("_last_saved_kmz")
+                _download_missions_dialog(saved["path"] if saved else None)
     with header_pilot_col:
         if st.button("🪪 Pilot", width='stretch', help="Set the pilot name and certificate number used on flight log templates"):
             _pilot_info_dialog()
@@ -4846,25 +4840,27 @@ if page == 'Creator':
     save_half, hud_half = top_bar.columns([2, 3])
     with save_half:
         existing_dirs = [d for d in os.listdir(MISSION_DIR) if os.path.isdir(os.path.join(MISSION_DIR, d)) and d != ".cache"]
-        save_col1, save_col2, save_col3 = st.columns([5, 0.7, 0.7])
+        # A hosted server has no desktop to show a folder picker on, so the
+        # browse button isn't built there at all - downloading is the header's
+        # job now, not this slot's.
+        if MULTI_USER_MODE:
+            save_col1, save_col3 = st.columns([5, 0.7])
+            save_col2 = None
+        else:
+            save_col1, save_col2, save_col3 = st.columns([5, 0.7, 0.7])
         with save_col1:
             save_option = st.selectbox(
                 "Save Destination", ["Root (missions/)"] + existing_dirs,
                 key="c_save_option", on_change=_clear_c_browsed_dir
             )
-        with save_col2:
-            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            if MULTI_USER_MODE:
-                # A hosted server has no desktop to show a folder picker on,
-                # so on the website this spot downloads saved missions instead.
-                if st.button("⬇️", key="c_btn_download_missions", width='stretch',
-                             help="Download saved missions - one mission or a whole folder"):
-                    _download_missions_dialog()
-            elif st.button("📂", key="c_btn_browse_dir", help="Browse for a save directory", width='stretch'):
-                picked = pick_folder_dialog("Select Save Directory")
-                if picked:
-                    st.session_state.c_browsed_dir = picked
-                    st.rerun()
+        if save_col2 is not None:
+            with save_col2:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if st.button("📂", key="c_btn_browse_dir", help="Browse for a save directory", width='stretch'):
+                    picked = pick_folder_dialog("Select Save Directory")
+                    if picked:
+                        st.session_state.c_browsed_dir = picked
+                        st.rerun()
         with save_col3:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             if st.button("＋", key="c_btn_new_folder_popup", help="Create a new empty folder", width='stretch'):
@@ -5256,11 +5252,8 @@ if page == 'Creator':
                                     map_front_ol, thumbnail_path, coords=path_coords, photo_count=est_photos
                                 )
                                 notices.success(f"Saved {final_filename}.kmz to {final_dir}/")
-                                offer_kmz_download(notices, "cmap", final_filepath, f"{final_filename}.kmz")
+                                remember_saved_kmz(final_filepath, f"{final_filename}.kmz")
 
-                    # Redraws the same button on every rerun, not only the one where
-                    # Save was clicked - see offer_kmz_download's docstring.
-                    offer_kmz_download(notices, "cmap")
             else:
                 notices.error(
                     "That shape has no area to map - its points are duplicated or fall on a "
@@ -5343,11 +5336,8 @@ if page == 'Creator':
                             safe_get_float('overlap_pct', 70.0), thumbnail_path, coords=coords, photo_count=est_photos
                         )
                         notices.success(f"Saved {final_filename}.kmz to {final_dir}/")
-                        offer_kmz_download(notices, "cline", final_filepath, f"{final_filename}.kmz")
+                        remember_saved_kmz(final_filepath, f"{final_filename}.kmz")
 
-            # Redrawn on every rerun, not only the one where Save was clicked -
-            # see offer_kmz_download's docstring.
-            offer_kmz_download(notices, "cline")
 
 # --- EDITOR MODE ---
 elif page == 'Editor':
@@ -5770,11 +5760,8 @@ elif page == 'Editor':
                                 os.remove(old_thumbnail)
 
                         notices.success(f"Successfully updated and saved as {final_filename}.kmz in {dir_label}!")
-                        offer_kmz_download(notices, "edit", final_filepath, f"{final_filename}.kmz")
+                        remember_saved_kmz(final_filepath, f"{final_filename}.kmz")
 
-            # Redrawn on every rerun, not only the one where Save was clicked -
-            # see offer_kmz_download's docstring.
-            offer_kmz_download(notices, "edit")
 
 # ==========================================
 # VIEWER MODE
