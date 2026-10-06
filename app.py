@@ -1364,6 +1364,55 @@ def _mission_files(kmz_path):
     return files
 
 
+@st.cache_data(show_spinner=False)
+def _flight_log_bytes(folder, filenames, pilot_name, certificate_number, _stamp):
+    """
+    The flight-log spreadsheet for `filenames`, as .xlsx bytes.
+
+    Cached because building one is slow for a reason that doesn't go away on
+    a retry: every mission's address is a Nominatim lookup, and that API's
+    usage policy caps us at roughly one request a second, so the gather sleeps
+    its way through the folder. Without the cache, every unrelated click in
+    the dialog - switching where to save, ticking the box off and on - would
+    pay that cost again from scratch.
+
+    `_stamp` is the missions' newest modification time. It's unused in the
+    body and exists only to key the cache: saving or re-saving a mission has
+    to produce a new log rather than serve the one built before the change.
+    """
+    rows = gather_flight_log_rows(folder, list(filenames))
+    workbook = build_flight_log_workbook(rows, pilot_name, certificate_number)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _flight_log_for(paths, label):
+    """
+    (filename, bytes) for the flight log covering `paths`, or None if it
+    could not be built.
+
+    Named after the folder it covers rather than using the planner's
+    per-folder counter: that counter lives in a file on the machine running
+    the app, which on the hosted version is one server shared by every
+    student, so the numbers it handed out would be sequential across
+    strangers rather than per person.
+    """
+    folder = os.path.dirname(paths[0])
+    filenames = tuple(sorted(os.path.basename(p) for p in paths))
+    newest = max(os.path.getmtime(p) for p in paths)
+    pilot = st.session_state.get("pilot_name", "")
+    cert = st.session_state.get("pilot_cert", "")
+    try:
+        data = _flight_log_bytes(folder, filenames, pilot, cert, newest)
+    except Exception:
+        logger.exception("could not build the flight log for %s", folder)
+        return None
+    pilot_part = sanitize_filename_component(pilot).replace(" ", "_") if pilot else "Pilot"
+    folder_part = sanitize_filename_component(label) if label != DOWNLOAD_ROOT_LABEL else "missions"
+    return (f"Flight_Log_{pilot_part}_{folder_part}.xlsx", data)
+
+
 @st.dialog("Download missions")
 def _download_missions_dialog(preselect_path=None):
     missions = _downloadable_missions()
@@ -1382,7 +1431,8 @@ def _download_missions_dialog(preselect_path=None):
         paths = [path for _, path in choices]
         default = paths.index(preselect_path) if preselect_path in paths else 0
         picked = st.selectbox("Mission", names, index=default, key="dl_mission")
-        files = _mission_files(paths[names.index(picked)])
+        log_paths, log_label = [paths[names.index(picked)]], choices[names.index(picked)][0]
+        files = _mission_files(log_paths[0])
         bundle_name = None
     else:
         labels = list(missions)
@@ -1391,7 +1441,21 @@ def _download_missions_dialog(preselect_path=None):
             format_func=lambda label: f"{label}  ({len(missions[label])} missions)",
         )
         files = [f for path in missions[picked] for f in _mission_files(path)]
+        log_paths, log_label = missions[picked], picked
         bundle_name = (picked != DOWNLOAD_ROOT_LABEL and sanitize_filename_component(picked)) or "missions"
+
+    # The same spreadsheet the planner builds: one row per mission, with
+    # everything knowable before the flight pre-filled and the rest left for
+    # the pilot to complete afterwards.
+    if st.checkbox("Include flight log (.xlsx)", key="dl_flight_log"):
+        if not st.session_state.get("pilot_name"):
+            st.caption("Set your name and certificate number with **🪪 Pilot** first, or the log's pilot cells come out blank.")
+        with st.spinner(f"Building the flight log for {len(log_paths)} mission(s) - this looks up each one's address..."):
+            log = _flight_log_for(log_paths, log_label)
+        if log is None:
+            st.warning("Could not build the flight log. The missions themselves will still download.")
+        else:
+            files = files + [log]
 
     where = st.radio(
         "Save to", ["Downloads folder", "Choose a location..."], horizontal=True, key="dl_where",
@@ -1408,10 +1472,24 @@ def _download_missions_dialog(preselect_path=None):
 
     _render_download_widget(files, pick_location=(where != "Downloads folder"), subfolder=bundle_name)
     if where == "Downloads folder" and not bundle_name and len(files) > 1:
+        # Described from what's actually in `files`, not from what was asked
+        # for: a mission saved before thumbnails existed has no preview
+        # picture, and a caption that names one anyway sends the student
+        # hunting for a file that was never downloaded.
+        has_preview = any(name.lower().endswith(".jpg") for name, _ in files)
+        parts = ["the mission"]
+        if has_preview:
+            parts.append("its preview picture")
+        if any(name.lower().endswith(".xlsx") for name, _ in files):
+            parts.append("the flight log")
+        listed = ", ".join(parts[:-1]) + f" and {parts[-1]}"
+        keep_together = (
+            " Keep the mission and picture together - the transfer app puts the picture on the "
+            "controller so you can tell missions apart." if has_preview else ""
+        )
         st.caption(
-            "Two files: the mission and its preview picture. Keep them together - the "
-            "transfer app puts the picture on the controller so you can tell missions "
-            "apart. If the browser asks to allow multiple downloads, allow it."
+            f"{len(files)} files: {listed}.{keep_together} If the browser asks to allow multiple "
+            "downloads, allow it."
         )
 
 
@@ -3312,7 +3390,7 @@ def build_flight_log_workbook(rows, pilot_name, certificate_number):
     ws.merge_cells(f"A1:{last_col}1")
     set_cell("A1", "sUAS Pilot Logbook", bold=True, size=16, underline=True, align="left")
     ws.merge_cells(f"A2:{last_col}2")
-    set_cell("A2", "Downloaded pre-filled from the Flight Planner's DJI Fly Transfer tab, one row per mission in the source folder.",
+    set_cell("A2", "Downloaded pre-filled from the Flight Planner, one row per mission in the source folder.",
               italic=True, size=9, color=_FLIGHT_LOG_GREY)
 
     set_cell("B4", "", fill=_FLIGHT_LOG_GREEN, border=True)
