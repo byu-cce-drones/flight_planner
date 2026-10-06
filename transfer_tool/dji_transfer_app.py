@@ -18,6 +18,7 @@ doing that on Tk's main thread would freeze the window and earn an
 Workers therefore talk back through a Queue that the UI drains on a timer;
 nothing but the main thread ever touches a widget.
 """
+import datetime
 import os
 import queue
 import subprocess
@@ -55,7 +56,7 @@ THUMB_MAX_WIDTH = 240
 THUMB_COLUMN_WIDTH = THUMB_MAX_WIDTH + 16
 # Enough for the slot number and nothing more; the rest goes to the preview.
 SLOT_COLUMN_WIDTH = 150
-WINDOW_TITLE = "DJI Fly Mission Transfer"
+WINDOW_TITLE = "DJI Fly Mission Transfer & Photo Sorter"
 MIN_WIDTH = 620
 # Tall enough to show a few slots at once - used whenever the screen allows.
 PREFERRED_HEIGHT = 700
@@ -67,6 +68,10 @@ class TransferApp:
         self.root = root
         self.kmz_path = None
         self.folder = None
+        self.sorter_source = None
+        self.sorter_output = None
+        self.groups = []
+        self.sorter_busy = False
         self.nests = {}
         self.events = queue.Queue()
         self.busy = False
@@ -83,9 +88,20 @@ class TransferApp:
     # ---------------------------------------------------------------- UI
 
     def _build_ui(self):
+        # Two jobs, one window: push missions out to the controller, and pull
+        # an outing's photos back into per-flight folders. They share nothing
+        # but the window, so they get a tab each rather than one long page.
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True)
+        transfer_tab = ttk.Frame(notebook)
+        sorter_tab = ttk.Frame(notebook)
+        notebook.add(transfer_tab, text="  Transfer missions  ")
+        notebook.add(sorter_tab, text="  Sort photos  ")
+        self._build_transfer_ui(transfer_tab)
+        self._build_sorter_ui(sorter_tab)
+
+    def _build_transfer_ui(self, outer):
         pad = {"padx": 12, "pady": 6}
-        outer = ttk.Frame(self.root)
-        outer.pack(fill="both", expand=True)
 
         # Step 1 - the mission file
         step1 = ttk.LabelFrame(outer, text="1.  Mission file")
@@ -209,6 +225,206 @@ class TransferApp:
                 core.logger.exception("could not read the work area")
         # Elsewhere Tk only knows the whole screen; allow for a menu bar/dock.
         return 0, self.root.winfo_screenheight() - 80
+
+    # ----------------------------------------------------------- sorter UI
+
+    def _build_sorter_ui(self, outer):
+        """
+        The other half of the round trip: a card full of one outing's photos,
+        split into a folder per flight by the gaps between shots.
+
+        Same shape as the transfer tab - choose, check, then do - because the
+        slow part (reading EXIF off several hundred photos, then copying
+        gigabytes) has to run off the main thread either way, and the user
+        should see what they are about to create before it starts.
+        """
+        pad = {"padx": 12, "pady": 6}
+
+        folders = ttk.LabelFrame(outer, text="1.  Folders")
+        folders.pack(fill="x", **pad)
+
+        src_row = ttk.Frame(folders)
+        src_row.pack(fill="x", padx=10, pady=(8, 2))
+        self.sorter_src_label = ttk.Label(src_row, text="No source folder chosen", foreground="grey")
+        self.sorter_src_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(src_row, text="Photos are here...", command=self.choose_sorter_source).pack(side="right")
+
+        out_row = ttk.Frame(folders)
+        out_row.pack(fill="x", padx=10, pady=(2, 8))
+        self.sorter_out_label = ttk.Label(out_row, text="No destination chosen", foreground="grey")
+        self.sorter_out_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(out_row, text="Put folders here...", command=self.choose_sorter_output).pack(side="right")
+
+        settings = ttk.LabelFrame(outer, text="2.  Which photos")
+        settings.pack(fill="x", **pad)
+
+        date_row = ttk.Frame(settings)
+        date_row.pack(fill="x", padx=10, pady=(8, 2))
+        ttk.Label(date_row, text="Date flown (YYYY-MM-DD)").pack(side="left")
+        self.sorter_date = ttk.Entry(date_row, width=14)
+        # Today, because photos are normally sorted the day they are flown.
+        self.sorter_date.insert(0, datetime.date.today().isoformat())
+        self.sorter_date.pack(side="right")
+
+        gap_row = ttk.Frame(settings)
+        gap_row.pack(fill="x", padx=10, pady=(2, 8))
+        ttk.Label(gap_row, text="New flight after a gap of (minutes)").pack(side="left")
+        self.sorter_gap = ttk.Spinbox(gap_row, from_=1, to=120, width=6)
+        self.sorter_gap.set("5")
+        self.sorter_gap.pack(side="right")
+
+        # Bottom-anchored before the list, for the same reason the transfer
+        # tab does it: pack() hands out space in call order.
+        self.sorter_status = ttk.Label(outer, text="Ready.", foreground="grey", anchor="w")
+        self.sorter_status.pack(side="bottom", fill="x", padx=12, pady=(0, 10))
+        self.sort_button = ttk.Button(
+            outer, text="Sort into folders", command=self.sort_photos, state="disabled",
+        )
+        self.sort_button.pack(side="bottom", fill="x", **pad)
+
+        groups_frame = ttk.LabelFrame(outer, text="3.  Flights found")
+        groups_frame.pack(fill="both", expand=True, **pad)
+        ttk.Button(groups_frame, text="Find flights", command=self.find_groups).pack(
+            anchor="w", padx=10, pady=(8, 4))
+        holder = ttk.Frame(groups_frame)
+        holder.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.groups_tree = ttk.Treeview(
+            holder, columns=("folder", "photos", "start"), show="headings", height=4,
+        )
+        for column, title, width in (
+            ("folder", "Folder", 240), ("photos", "Photos", 70), ("start", "First photo", 160),
+        ):
+            self.groups_tree.heading(column, text=title)
+            self.groups_tree.column(column, width=width, anchor="w")
+        groups_scroll = ttk.Scrollbar(holder, orient="vertical", command=self.groups_tree.yview)
+        self.groups_tree.configure(yscrollcommand=groups_scroll.set)
+        self.groups_tree.pack(side="left", fill="both", expand=True)
+        groups_scroll.pack(side="right", fill="y")
+
+    # -------------------------------------------------------- sorter actions
+
+    def choose_sorter_source(self):
+        folder = filedialog.askdirectory(title="Where are the photos?")
+        if not folder:
+            return
+        self.sorter_source = folder
+        self.sorter_src_label.configure(text=folder, foreground="black")
+        # A new card invalidates whatever the last scan found.
+        self._clear_groups()
+
+    def choose_sorter_output(self):
+        folder = filedialog.askdirectory(title="Where should the folders go?")
+        if not folder:
+            return
+        self.sorter_output = folder
+        self.sorter_out_label.configure(text=folder, foreground="black")
+        self._refresh_sort_button()
+
+    def _sorter_date(self):
+        """The date box as a date, or None if it isn't one."""
+        try:
+            return datetime.date.fromisoformat(self.sorter_date.get().strip())
+        except ValueError:
+            return None
+
+    def find_groups(self):
+        if not self.sorter_source:
+            messagebox.showinfo(WINDOW_TITLE, "Choose the folder your photos are in first.")
+            return
+        day = self._sorter_date()
+        if day is None:
+            messagebox.showerror(
+                WINDOW_TITLE,
+                f"{self.sorter_date.get()!r} isn't a date.\n\nWrite it as YYYY-MM-DD, "
+                "for example 2026-10-06.",
+            )
+            return
+        try:
+            gap = max(1, int(float(self.sorter_gap.get())))
+        except ValueError:
+            gap = 5
+
+        source = self.sorter_source
+        self._clear_groups()
+        self._set_sorter_busy(True, "Reading the time each photo was taken...")
+        self._run_bg(
+            lambda: core.find_photo_groups(source, day, gap),
+            self._groups_found,
+        )
+
+    def sort_photos(self):
+        if not (self.groups and self.sorter_output):
+            return
+        groups, output = self.groups, self.sorter_output
+        total = sum(len(g) for g in groups)
+        if not messagebox.askyesno(
+            WINDOW_TITLE,
+            f"Copy {total} photos into {len(groups)} folders under:\n\n{output}\n\n"
+            "The originals stay where they are.",
+        ):
+            return
+        self._set_sorter_busy(True, f"Copying {total} photos - this can take a while...")
+        self._run_bg(lambda: core.copy_photo_groups(groups, output), self._sort_done)
+
+    # -------------------------------------------------------- sorter results
+
+    def _groups_found(self, groups, error):
+        self._set_sorter_busy(False)
+        if error is not None:
+            self._set_sorter_status(f"Could not read that folder: {error}", error=True)
+            messagebox.showerror(WINDOW_TITLE, f"Could not read that folder:\n\n{error}")
+            return
+        self.groups = groups or []
+        if not self.groups:
+            self._set_sorter_status("No photos from that date in that folder.", error=True)
+            messagebox.showinfo(
+                WINDOW_TITLE,
+                "No photos in that folder were taken on that date.\n\nCheck the date, and "
+                "that you picked the folder the photos are actually in.",
+            )
+            return
+        for i, group in enumerate(self.groups):
+            self.groups_tree.insert("", "end", values=(
+                core.default_group_folder_name(i, group),
+                len(group),
+                group[0]["time"].strftime("%H:%M:%S"),
+            ))
+        total = sum(len(g) for g in self.groups)
+        self._set_sorter_status(f"{len(self.groups)} flights, {total} photos. Choose where they go, then sort.")
+        self._refresh_sort_button()
+
+    def _sort_done(self, copied, error):
+        self._set_sorter_busy(False)
+        if error is not None:
+            self._set_sorter_status(f"Sorting failed: {error}", error=True)
+            messagebox.showerror(WINDOW_TITLE, f"Sorting failed:\n\n{error}")
+            return
+        self._set_sorter_status(f"Sorted {copied} photos into {len(self.groups)} folders.")
+        messagebox.showinfo(
+            WINDOW_TITLE,
+            f"Sorted {copied} photos into {len(self.groups)} folders in:\n\n{self.sorter_output}\n\n"
+            "Name each folder after the mission it came from, then upload it.",
+        )
+
+    # --------------------------------------------------------- sorter state
+
+    def _clear_groups(self):
+        self.groups_tree.delete(*self.groups_tree.get_children())
+        self.groups = []
+        self._refresh_sort_button()
+
+    def _set_sorter_status(self, text, error=False):
+        self.sorter_status.configure(text=text, foreground="#b00020" if error else "grey")
+
+    def _set_sorter_busy(self, busy, status=None):
+        self.sorter_busy = busy
+        if status:
+            self._set_sorter_status(status)
+        self._refresh_sort_button()
+
+    def _refresh_sort_button(self):
+        ready = bool(self.groups) and bool(self.sorter_output) and not self.sorter_busy
+        self.sort_button.state(["!disabled" if ready else "disabled"])
 
     def _check_backend(self):
         """Say up front if this machine can't talk to a controller at all."""

@@ -37,6 +37,8 @@ planner (or, once frozen, a Python install at all):
   get_mtp_session_class()                - the backend for this OS, or None
   fetch_controller_nests_and_previews()  - scan the controller for slots
   push_mission_to_nest(kmz_path, uuid)   - write one mission into a slot
+  find_photo_groups(folder, date, gap)   - split an outing's photos by time
+  copy_photo_groups(groups, out)         - copy each group into its own folder
 
 GENERATED FILE - do not hand-edit. Fix app.py, then re-run build_core.py.
 `python build_core.py --check` verifies this copy still matches app.py.
@@ -50,7 +52,13 @@ import ctypes
 import ctypes.util
 import platform
 import logging
+import shutil
 import subprocess
+from datetime import datetime, timedelta
+
+# Pillow reads the EXIF timestamps the photo sorter groups by. It is also
+# what the mission previews need, so a build without it was already degraded.
+from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dji_fly_transfer")
@@ -67,6 +75,12 @@ BLOCKS = [
     ("def", "kmz_companion_path"),
     ("def", "fetch_controller_nests_and_previews"),
     ("def", "push_mission_to_nest"),
+    # Photo sorter. Streamlit-free since the progress reporting moved to
+    # callbacks, which is what lets them be copied rather than rewritten.
+    ("def", "get_exif_datetime"),
+    ("def", "default_group_folder_name"),
+    ("def", "find_photo_groups"),
+    ("def", "copy_photo_groups"),
 ]
 
 
