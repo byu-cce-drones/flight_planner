@@ -942,6 +942,10 @@ def add_basemap(fmap):
 # is kept intact so flipping this back to True restores it unchanged.
 MEASURE_TOOL_ENABLED = False
 
+# This fork's own repository - where the Report Bug button sends people, and
+# where the desktop app's releases are published.
+PLANNER_REPO_URL = "https://github.com/byu-cce-drones/flight_planner"
+
 MISSION_DIR = "missions"
 SURFACES_DIR = "surfaces"
 FLIGHT_LOG_DIR = "flight_log"
@@ -4555,7 +4559,7 @@ def render_99_override(container, scope, est_photos):
     return bool(st.session_state.get(f"{scope}_99_override_ok"))
 
 
-@st.dialog("README", width="large")
+@st.dialog("User Guide", width="large")
 def _readme_dialog():
     try:
         with open(README_PATH, encoding="utf-8") as f:
@@ -4680,13 +4684,13 @@ with st.container(key="app_header"):
     # missions are stranded on the server - locally the student already has
     # the file. Its column is left out entirely rather than rendered empty,
     # so the local header keeps its original spacing.
-    # Wider than its neighbours: "Download" is a long word, and at 0.6 it wraps
-    # mid-word inside the button.
-    header_cols = [1, 4] + ([1.0] if MULTI_USER_MODE else []) + [0.6, 0.6]
+    # Wider than their neighbours: "Download" and "Report Bug" are long labels,
+    # and at 0.6 they wrap mid-word inside the button.
+    header_cols = [1, 4] + ([1.0] if MULTI_USER_MODE else []) + [0.6, 0.95, 0.95]
     header_columns = st.columns(header_cols, gap="medium")
     header_title_col, header_tabs_col = header_columns[0], header_columns[1]
     header_download_col = header_columns[2] if MULTI_USER_MODE else None
-    header_pilot_col, header_readme_col = header_columns[-2], header_columns[-1]
+    header_pilot_col, header_bug_col, header_readme_col = header_columns[-3:]
     with header_title_col:
         st.markdown("# Flight Planner")
     with header_tabs_col:
@@ -4706,8 +4710,14 @@ with st.container(key="app_header"):
     with header_pilot_col:
         if st.button("🪪 Pilot", width='stretch', help="Set the pilot name and certificate number used on flight log templates"):
             _pilot_info_dialog()
+    with header_bug_col:
+        # Straight to the issue tracker rather than a form in the app: a bug
+        # report is only useful if it reaches somewhere that gets read, and
+        # this app has no inbox of its own.
+        st.link_button("🐞 Report Bug", f"{PLANNER_REPO_URL}/issues", width='stretch',
+                       help="Found a problem? Open an issue on GitHub")
     with header_readme_col:
-        if st.button("📖 README", width='stretch'):
+        if st.button("📖 User Guide", width='stretch'):
             _readme_dialog()
 
 # --- CREATOR MODE ---
@@ -6540,7 +6550,7 @@ elif page == 'DJI Fly Transfer & Photo Sorter':
     # do. Keep this block self-contained: it is the one place this fork
     # deliberately diverges from upstream, and merges from upstream are much
     # easier when the divergence is a single contiguous region.
-    TRANSFER_APP_REPO = "https://github.com/byu-cce-drones/flight_planner"
+    TRANSFER_APP_REPO = PLANNER_REPO_URL
     # /releases/latest/ follows whatever the newest release is, so publishing a
     # new build never requires editing this file again.
     TRANSFER_APP_MAC_URL = (
