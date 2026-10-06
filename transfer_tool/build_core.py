@@ -77,6 +77,8 @@ BLOCKS = [
     ("def", "push_mission_to_nest"),
     # Photo sorter. Streamlit-free since the progress reporting moved to
     # callbacks, which is what lets them be copied rather than rewritten.
+    ("def", "_WINDOWS_ILLEGAL_FILENAME_CHARS_RE"),
+    ("def", "sanitize_filename_component"),
     ("def", "get_exif_datetime"),
     ("def", "default_group_folder_name"),
     ("def", "find_photo_groups"),

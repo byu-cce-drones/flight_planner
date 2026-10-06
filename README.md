@@ -10,48 +10,21 @@ The app is split into 5 tabs. Click a tab to jump to its section below.
 * [Creator](#the-creator)
 * [Editor](#the-editor)
 * [Viewer](#the-viewer)
-* [Photo Sorter](#photo-sorter)
-* [DJI Fly Transfer](#dji-fly-transfer)
-
-## Running the Planner Steps
-1. Download this repository.
-- Create a new environment. The code uses specific library versions and doesn't work with newer ones. Python 3.11 and 3.12 is confirmed to work. 
-
-2. Install the dependencies with the following code.
-```
-pip install -r path/to/requirements.txt
-```
-> **Note**: Update path/to/requirements.txt
-> with the relative path to the folder.
-
-> **Note**: the planner never talks to a controller itself on this fork - the desktop app handed out by the DJI Fly Transfer tab does that, and it brings its own USB support with it.
-3. Launch the app by running the following in the terminal. 
-The app will open in your web browser using a local host.
-```
-streamlit run path/to/app.py
-```
-
-## Deploying for a Class or Other Shared Use
-Run this way, on your own machine, everything below doesn't apply - skip to *Using the Flight Planner*.
-
-A normal deployment (e.g. Streamlit Community Cloud) runs the app as one process shared by everyone who opens the link at the same time - there is no separate copy of the server per visitor. Two things follow from that, and this app handles both.
-
-There is no local computer for anyone to save to. The person using it isn't on the same machine as the server, so nothing saved there is reachable by browsing to a folder - and a cloud host's storage is usually wiped on the next restart anyway. Every "Save & Generate KMZ" button is followed by a ⬇️ Download KMZ button so the file comes back down to the visitor's own device instead of staying stranded on the server. It stays available even after saving again or tweaking another setting, not just for the one moment right after clicking Save.
-
-A single shared "missions" folder is a shared folder for everyone, unless told otherwise - every visitor would otherwise see, and be able to overwrite or delete, every other visitor's saved missions and presets. Set the environment variable below to give each visitor their own private, isolated space instead:
-```
-FLIGHT_PLANNER_MULTI_USER=1
-```
-On Streamlit Community Cloud this goes in the app's Settings &rarr; Secrets panel (as `FLIGHT_PLANNER_MULTI_USER = "1"`); anywhere else, set it as a normal environment variable before `streamlit run`. Off by default, so a plain local install is completely unaffected.
-
-With it on, each browser tab gets its own subfolder under `missions/_sessions/`, invisible to every other visitor, and disappears once that tab's session ends. The OS-native folder-browse buttons ("📂") also don't work in this kind of container (there's no desktop to show a folder picker on), so in this mode the Creator's 📂 becomes a ⬇️ download button. It opens a window for saving one mission or a whole folder, either to the Downloads folder or to a location the visitor chooses (Chrome and Edge; Safari and Firefox always use the Downloads folder). Each mission comes with its preview picture, which the transfer app puts on the controller. The same button also appears under the Save buttons once something has been saved. The DJI Fly Transfer tab is fine in this setup: it hands out the desktop transfer app rather than reaching for USB itself.
-
+* [DJI Fly Transfer & Photo Sorter](#dji-fly-transfer)
 
 ## Using the Flight Planner
 The mission planner is split into three creation tabs: the *Creator*, the *Editor*, and the *Viewer*. 
 
 The *Photo Sorter* and *DJI Fly Transfer* are tabs designed specifically for getting around the restrictions and annoyances that come with the more affordable commercial drone that use the  DJI Fly app. These are explained in a later section. 
 
+### **Downloading Missions**
+
+In order to upload your missions to your drone, you will need to download them from the website. 
+This should be done at least every time you are done planning with the app, since Streamlit will remove any missions left on the site. 
+To download, up in the top left corner press the download button button. 
+You will have the option to download one mission or an entire folder of missions. 
+You may also check the checkbox to download a flight log for your missions. 
+You will then choose a download location for the folder. 
 
 ### **The Creator**
 
@@ -277,33 +250,16 @@ They also dump all mission images into one general folder, making it difficult t
 These issues are circumvented by the *Photo Sorter* and *DJI Fly Transfer* tabs. 
 
 
-### **Photo Sorter**
-
-<img src="images/photo_sorter_overview.png" alt="" width="100%">
-
-This tab allows you to automatically group mission photos into folders based on the times that they were taken. 
-It uses the following inputs:'
-
-* **Source Directory**: The location where the drone's image folder is located. 
-* **Output Directory**: Where you want the separated mission folders to be saved. 
-The folders are saved with the date and time of the first image in the folder. 
-* **Target Date**: What date the sorter will look for when grouping missions. 
-Only photos taken on this date will be sorted. 
-* **Time Gap (minutes)**: How long there needs to be between photos for them to be considered as part of different groups/missions. Accepts fractions of a minute - e.g. 0.5 for a 30 second gap. 
-* **Naming groups**: This checkbox allows you to give a name each photo group found before seperating into independent folders. 
-Shows the first photo in each group.
-Useful if you know the order of your flights. 
-
 ### **DJI Fly Transfer**
 
 This tab hands out a small desktop app that puts missions onto the controller.
-The planner can't do it itself here: this version runs in a browser, and a browser has no way to reach a USB device.
 Plan the mission in the Creator, download the `.kmz`, then use the app to move it across.
+The app also provides a photo transfer ability, which helps will sorting photos from a DJI Fly drone. 
 
 #### 1. Download the app
 Press the download button for your computer on the tab. The app isn't signed, so each version needs one extra step the first time only - the warning is expected:
 - **macOS**: unzip what comes down, then **right-click the app and choose Open**, then Open again. Double-clicking refuses with "unidentified developer" or "damaged" until you have done that once.
-- **Windows**: run the `.exe` - there is nothing to install. If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**.
+- **Windows**: run the `.exe`. If Windows shows "Windows protected your PC", click **More info**, then **Run anyway**.
 
 #### 2. Prepare the controller
 Make sure at least one waypoint mission is already saved in DJI Fly.
@@ -314,12 +270,12 @@ macOS only lets one program talk to the controller at a time, and Preview being 
 The app checks for these when a scan fails and names whichever one is running.
 
 #### 3. Transfer
-Keep each mission's `.jpg` preview next to its `.kmz` - the planner's download includes it - and the app puts it on the controller as that mission's thumbnail.
+Keep each mission's `.jpg` preview next to its `.kmz`. The app puts it on the controller as that mission's thumbnail.
 Press **Choose .kmz...** for a single mission, or **Choose folder...** to pick from a folder you have been saving missions into.
 Then press **Scan controller**, choose a slot, and press **Transfer to controller**.
 
 Each slot is listed with a preview picture of the mission currently sitting in it.
-Due to the restricted nature of the controller software, the names of the controller missions appear as long strings of numbers and letters, so that picture is the only practical way to tell which mission is which - both when choosing what to overwrite and afterwards on the controller itself.
+Due to the restricted nature of the controller software, the names of the controller missions appear as long strings of numbers and letters (or just the date the mission was created on the controller side), so that picture is the only practical way to tell which mission is which - both when choosing what to overwrite and afterwards on the controller itself.
 
 Once it's done, open the mission list in DJI Fly.
 If the new mission isn't there straight away, back out of the list and open it again.
@@ -342,6 +298,25 @@ To update them, in the mission history page, click on a mission to have it load,
 This will update the thumbnail. 
 
 It is recommended to save and update the thumbnails immediately after transferring the missions, while you still remember which slot each one went into.
+
+#### **Photo Sorter**
+
+Sorting photos happens in the same desktop app as the transfers, on its **Sort photos** tab.
+It can't be done from this page: your photos are on your card, not on the server running the website, and an outing is several gigabytes of them.
+
+It groups an outing's photos into one folder per flight, using the gaps between shots, and it copies rather than moves - your originals stay exactly where they are.
+It uses the following inputs:
+
+* **Photos are here**: the folder the drone's images are currently in.
+* **Put folders here**: where the new flight folders should be created.
+* **Date flown**: only photos taken on this date are sorted. Written as YYYY-MM-DD, and it starts on today's date.
+* **New flight after a gap of (minutes)**: how long a gap between two photos means a new flight. This is why the checklist asks for **30 seconds** between flights - any less and two flights land in the same folder.
+
+Press **Find flights** to see what it would create - each flight's folder name, how many photos are in it, and the time of its first photo - before anything is copied.
+Each folder is named after the date and time of its first image to begin with.
+To name one after the mission it came from, select it and press **Rename folder...**, or double-click it.
+This is where the flight order you noted on the checklist pays off.
+Then press **Sort into folders**.
 
 ## Acknowledgements
 - Luigi Pirelli for providing the photo footprint code base. 

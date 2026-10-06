@@ -1052,6 +1052,20 @@ def push_mission_to_nest(local_kmz_path, target_uuid):
         return False, f"Unexpected error: {type(e).__name__}: {e}"
 
 
+_WINDOWS_ILLEGAL_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_filename_component(name):
+    """
+    Cleans a user-typed mission name so it's safe to build a filename from
+    on any OS. Applied once, right where the name comes off its text_input
+    widget, so every downstream use (filename, thumbnail label, success
+    message) stays consistent with what actually got saved.
+    """
+    cleaned = _WINDOWS_ILLEGAL_FILENAME_CHARS_RE.sub('', name).strip().rstrip('.')
+    return cleaned or "Mission"
+
+
 def get_exif_datetime(filepath):
     """Extracts the exact time the photo was taken from EXIF data."""
     try:

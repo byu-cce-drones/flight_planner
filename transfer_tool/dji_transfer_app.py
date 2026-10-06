@@ -26,7 +26,7 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import dji_transfer_core as core
 
@@ -71,6 +71,7 @@ class TransferApp:
         self.sorter_source = None
         self.sorter_output = None
         self.groups = []
+        self.group_names = []
         self.sorter_busy = False
         self.nests = {}
         self.events = queue.Queue()
@@ -284,8 +285,17 @@ class TransferApp:
 
         groups_frame = ttk.LabelFrame(outer, text="3.  Flights found")
         groups_frame.pack(fill="both", expand=True, **pad)
-        ttk.Button(groups_frame, text="Find flights", command=self.find_groups).pack(
-            anchor="w", padx=10, pady=(8, 4))
+        groups_bar = ttk.Frame(groups_frame)
+        groups_bar.pack(fill="x", padx=10, pady=(8, 4))
+        ttk.Button(groups_bar, text="Find flights", command=self.find_groups).pack(side="left")
+        # Naming the folders before sorting is part of how these get flown -
+        # the checklist tells people to note the order they flew missions in,
+        # precisely so the folders can be named after them here.
+        self.rename_button = ttk.Button(
+            groups_bar, text="Rename folder...", command=self.rename_group, state="disabled")
+        self.rename_button.pack(side="left", padx=(8, 0))
+        ttk.Label(groups_bar, text="(or double-click a flight)", foreground="grey").pack(
+            side="left", padx=(8, 0))
         holder = ttk.Frame(groups_frame)
         holder.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self.groups_tree = ttk.Treeview(
@@ -300,6 +310,8 @@ class TransferApp:
         self.groups_tree.configure(yscrollcommand=groups_scroll.set)
         self.groups_tree.pack(side="left", fill="both", expand=True)
         groups_scroll.pack(side="right", fill="y")
+        self.groups_tree.bind("<Double-1>", lambda _e: self.rename_group())
+        self.groups_tree.bind("<<TreeviewSelect>>", lambda _e: self._refresh_rename_button())
 
     # -------------------------------------------------------- sorter actions
 
@@ -355,7 +367,7 @@ class TransferApp:
     def sort_photos(self):
         if not (self.groups and self.sorter_output):
             return
-        groups, output = self.groups, self.sorter_output
+        groups, output, names = self.groups, self.sorter_output, list(self.group_names)
         total = sum(len(g) for g in groups)
         if not messagebox.askyesno(
             WINDOW_TITLE,
@@ -364,7 +376,37 @@ class TransferApp:
         ):
             return
         self._set_sorter_busy(True, f"Copying {total} photos - this can take a while...")
-        self._run_bg(lambda: core.copy_photo_groups(groups, output), self._sort_done)
+        self._run_bg(lambda: core.copy_photo_groups(groups, output, names), self._sort_done)
+
+    def rename_group(self):
+        """Rename the selected flight's folder before anything is copied."""
+        selection = self.groups_tree.selection()
+        if not selection:
+            return
+        row = selection[0]
+        index = self.groups_tree.index(row)
+        current = self.group_names[index]
+        typed = simpledialog.askstring(
+            WINDOW_TITLE, "Folder name for this flight:", initialvalue=current, parent=self.root)
+        if typed is None:
+            return
+        # Same cleaning the planner applies to a typed mission name, so a
+        # folder named here can't be one the OS refuses to create.
+        cleaned = core.sanitize_filename_component(typed)
+        taken = {n for i, n in enumerate(self.group_names) if i != index}
+        if cleaned in taken:
+            messagebox.showerror(
+                WINDOW_TITLE,
+                f"Another flight is already going into a folder called {cleaned!r}.\n\n"
+                "Give this one a different name - two flights can't share a folder.",
+            )
+            return
+        self.group_names[index] = cleaned
+        self.groups_tree.set(row, "folder", cleaned)
+
+    def _refresh_rename_button(self):
+        has_row = bool(self.groups_tree.selection())
+        self.rename_button.state(["!disabled" if has_row else "disabled"])
 
     # -------------------------------------------------------- sorter results
 
@@ -383,15 +425,17 @@ class TransferApp:
                 "that you picked the folder the photos are actually in.",
             )
             return
-        for i, group in enumerate(self.groups):
+        self.group_names = [core.default_group_folder_name(i, g) for i, g in enumerate(self.groups)]
+        for name, group in zip(self.group_names, self.groups):
             self.groups_tree.insert("", "end", values=(
-                core.default_group_folder_name(i, group),
-                len(group),
-                group[0]["time"].strftime("%H:%M:%S"),
+                name, len(group), group[0]["time"].strftime("%H:%M:%S"),
             ))
         total = sum(len(g) for g in self.groups)
-        self._set_sorter_status(f"{len(self.groups)} flights, {total} photos. Choose where they go, then sort.")
+        self._set_sorter_status(
+            f"{len(self.groups)} flights, {total} photos. Rename any folder you want, "
+            "choose where they go, then sort.")
         self._refresh_sort_button()
+        self._refresh_rename_button()
 
     def _sort_done(self, copied, error):
         self._set_sorter_busy(False)
@@ -411,6 +455,7 @@ class TransferApp:
     def _clear_groups(self):
         self.groups_tree.delete(*self.groups_tree.get_children())
         self.groups = []
+        self.group_names = []
         self._refresh_sort_button()
 
     def _set_sorter_status(self, text, error=False):
