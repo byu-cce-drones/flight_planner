@@ -301,20 +301,22 @@ It is recommended to save and update the thumbnails immediately after transferri
 
 #### **Photo Sorter**
 
-<img src="images/photo_sorter_overview.png" alt="" width="100%">
+Sorting photos happens in the same desktop app as the transfers, on its **Sort photos** tab.
+It can't be done from this page: your photos are on your card, not on the server running the website, and an outing is several gigabytes of them.
 
-This part of the app allows you to automatically group mission photos into folders based on the times that they were taken. 
-It uses the following inputs:'
+It groups an outing's photos into one folder per flight, using the gaps between shots, and it copies rather than moves - your originals stay exactly where they are.
+It uses the following inputs:
 
-* **Source Directory**: The location where the drone's image folder is located.
-* **Output Directory**: Where you want the separated mission folders to be saved. 
-The folders are saved with the date and time of the first image in the folder. 
-* **Target Date**: What date the sorter will look for when grouping missions. 
-Only photos taken on this date will be sorted. 
-* **Time Gap (minutes)**: How long there needs to be between photos for them to be considered as part of different groups/missions. Accepts fractions of a minute - e.g. 0.5 for a 30 second gap. 
-* **Naming groups**: This checkbox allows you to give a name each photo group found before seperating into independent folders. 
-Shows the first photo in each group.
-Useful if you know the order of your flights. 
+* **Photos are here**: the folder the drone's images are currently in.
+* **Put folders here**: where the new flight folders should be created.
+* **Date flown**: only photos taken on this date are sorted. Written as YYYY-MM-DD, and it starts on today's date.
+* **New flight after a gap of (minutes)**: how long a gap between two photos means a new flight. This is why the checklist asks for **30 seconds** between flights - any less and two flights land in the same folder.
+
+Press **Find flights** to see what it would create - each flight's folder name, how many photos are in it, and the time of its first photo - before anything is copied.
+Each folder is named after the date and time of its first image to begin with.
+To name one after the mission it came from, select it and press **Rename folder...**, or double-click it.
+This is where the flight order you noted on the checklist pays off.
+Then press **Sort into folders**.
 
 ## Acknowledgements
 - Luigi Pirelli for providing the photo footprint code base. 
