@@ -1,7 +1,9 @@
 # DJI Fly Mission Transfer
 
-A small desktop helper that does exactly one job: take a `.kmz` built in the
-Flight Planner and push it into a mission slot on a connected controller.
+A small desktop helper with two jobs, one on each side of a flight. Before
+it: take a `.kmz` built in the Flight Planner and push it into a mission slot
+on a connected controller. After it: sort the outing's photos into one folder
+per flight.
 
 **Controller support**: **RC 2** works, confirmed against real hardware. The plain **DJI RC**
 (the model without "2" or "Pro" in the name - e.g. RM330) **does not work, and this is not
@@ -16,6 +18,8 @@ downloaded `.kmz`. This helper is the other half: it takes that file from
 your computer and puts it on the controller.
 
 Plan a mission on the website, download the `.kmz`, then transfer it here.
+The photo sorter is here for the same reason: the website can't read a
+folder on your computer either.
 
 ## For students - using it
 
@@ -40,6 +44,38 @@ Plan a mission on the website, download the `.kmz`, then transfer it here.
 
 The preview picture next to each slot shows the mission currently in it, so
 you can see what you are about to overwrite.
+
+If the mission went over but its preview picture didn't, the helper says so,
+and the slot shows the new picture after the next scan.
+
+If a transfer fails partway, the helper puts the slot's old mission back. If
+it can't, it says where on your computer it saved a copy of the old one.
+
+### Sorting the photos
+
+The **Sort photos** tab splits a card full of photos into one folder per
+flight, using the gaps between shots.
+
+1. **Photos are here...** - the folder the photos are in (the card, or a copy
+   of it). **Put folders here...** - where the new folders should go.
+2. Set the date flown. Leave the gap at **20 seconds** unless you have a
+   reason not to: with **30 seconds** between flights, as the checklist says,
+   that splits them cleanly. It can't go below 5, because one flight starts
+   splitting at its own turns.
+3. **Find flights**. Each flight is listed with its photo count and the time
+   of its first photo. If any photos were left out - no time recorded, or
+   taken on another day - it says how many and why.
+4. Double-click a flight to name its folder after the mission you flew. Names
+   Windows can't use (`CON`, `COM1`, ...) are refused, and two flights can't
+   share a name, even with different capitals.
+5. **Sort into folders**. Photos are copied, never moved - the originals stay
+   where they are. A raw `.dng` goes into the same folder as the `.jpg` of
+   the same name.
+
+Sorting never overwrites anything. Run it twice and the second run skips the
+photos that are already there. If a folder already holds a *different* photo
+with the same name (two outings' `DJI_0001.JPG`, say), the new one is saved
+beside it as `DJI_0001 (2).JPG`.
 
 ### Controller support
 
@@ -138,9 +174,9 @@ producing a bundle that fails later on someone else's machine.
 
 ### How this relates to `app.py`
 
-`dji_transfer_core.py` is **generated** - it is app.py's MTP/WPD layer and its
-two transfer functions, copied out verbatim by `build_core.py`. Do not edit
-it by hand.
+`dji_transfer_core.py` is **generated** - it is app.py's MTP/WPD layer, its
+transfer functions and its photo-sorter functions, copied out verbatim by
+`build_core.py`. Do not edit it by hand.
 
 It is a copy rather than a shared import on purpose. app.py deliberately
 keeps that bridge inlined (it says why in its own comments), and it is
@@ -155,7 +191,7 @@ python build_core.py --check    # non-zero exit if it no longer matches app.py
 
 Run that in CI, or before any build. If you fix a controller bug, fix it in
 `app.py` and re-run `build_core.py` - otherwise the planner and the helper
-quietly disagree about how to talk to a controller.
+quietly disagree about how to talk to a controller, or how to sort photos.
 
 ### What is in the bundle
 

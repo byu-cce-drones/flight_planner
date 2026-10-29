@@ -1,11 +1,14 @@
 """
 DJI Fly Mission Transfer - a small desktop helper.
 
-Does one job: take a .kmz built in the Flight Planner (the web version
-included, which can't reach USB at all) and push it into a mission slot on a
-connected RC 2. Nothing else from the planner is here - no map, no mission
-editing - so this can be frozen into a single download that needs neither
-Python nor any libraries installed.
+Two jobs, one on each side of a flight, as two tabs. Transfer: take a .kmz
+built in the Flight Planner (the web version included, which can't reach USB
+at all) and push it into a mission slot on a connected RC 2. Sort photos:
+split an outing's photos into a folder per flight, which the web version
+can't do either, having no way to read a folder on this computer. Nothing
+else from the planner is here - no map, no mission editing - so this can be
+frozen into a single download that needs neither Python nor any libraries
+installed.
 
 Run from source:   python dji_transfer_app.py
 Build a binary:    python build_installer.py       (see that script's notes)
