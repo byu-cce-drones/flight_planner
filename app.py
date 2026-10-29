@@ -1451,8 +1451,8 @@ def _mission_files(kmz_path):
     return files
 
 
-@st.cache_data(show_spinner=False)
-def _flight_log_bytes(folder, filenames, pilot_name, certificate_number, _stamp):
+@st.cache_data(show_spinner=False, max_entries=64)
+def _flight_log_bytes(folder, filenames, pilot_name, certificate_number, stamp):
     """
     The flight-log spreadsheet for `filenames`, as .xlsx bytes.
 
@@ -1463,9 +1463,11 @@ def _flight_log_bytes(folder, filenames, pilot_name, certificate_number, _stamp)
     the dialog - switching where to save, ticking the box off and on - would
     pay that cost again from scratch.
 
-    `_stamp` is the missions' newest modification time. It's unused in the
+    `stamp` is the missions' newest modification time. It's unused in the
     body and exists only to key the cache: saving or re-saving a mission has
     to produce a new log rather than serve the one built before the change.
+    (No leading underscore - Streamlit leaves _-named arguments out of the
+    cache key, which is how a stale log kept being served.)
     """
     rows = gather_flight_log_rows(folder, list(filenames))
     workbook = build_flight_log_workbook(rows, pilot_name, certificate_number)
@@ -3700,7 +3702,9 @@ def gather_flight_log_rows(folder, kmz_filenames, progress=None):
 
         rows.append({
             "flight_name": flight_name,
-            "aircraft": "DJI Fly",
+            # Read from the file, not assumed: the download dialog logs any
+            # saved mission, and DJI Pilot 2 ones were all labelled DJI Fly.
+            "aircraft": "DJI Fly" if is_dji_fly_kmz(full_path) else "DJI Pilot 2",
             "location": location or "",
             "height": height,
             "pitch": pitch,
