@@ -24,6 +24,12 @@ This should be done at least every time you are done planning with the app, sinc
 To download, press the **⬇️ Download** button in the header at the top of the page, just right of the tabs (it only appears on the website). 
 You will have the option to download one mission or an entire folder of missions. 
 You may also check the checkbox to download a flight log for your missions. 
+It is a spreadsheet with two sheets:
+* **Mission Log**: the class mission log, one column per mission. 
+Everything the planner knows is already filled in (green): file name, drone, altitude, GSD, overlaps, speed, pitch, passes, distance, photos, flight time and location. 
+Fill in the yellow cells by hand - hard constraints, objective, Y/N, your most important decision, and the date, start and stop times and remarks once you have flown. 
+Blue cells are calculated: batteries needed, the flight time check, and minutes flown. 
+* **Pilot Logbook**: one row per flight, for your pilot log. It reads the date, times and remarks from the Mission Log, so you only enter them once.
 You will then choose a download location for the folder. 
 
 ### **The Creator**

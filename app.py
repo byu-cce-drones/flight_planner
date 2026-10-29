@@ -19,6 +19,7 @@ from folium.plugins import Draw, PolyLineTextPath
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 # Optional: only the experimental decomposed coverage strategy needs shapely.
 # Imported defensively so a missing install degrades to "that option is
@@ -4235,31 +4236,283 @@ def gather_flight_log_rows(folder, kmz_filenames, progress=None):
             location = get_address_from_coords(*coords)
             time.sleep(1)  # Nominatim usage policy: max ~1 request/second.
 
-        rows.append({
+        is_fly = is_dji_fly_kmz(full_path)
+        row = {
+            "file_name": base_name,
             "flight_name": flight_name,
             # Read from the file, not assumed: the download dialog logs any
             # saved mission, and DJI Pilot 2 ones were all labelled DJI Fly.
-            "aircraft": "DJI Fly" if is_dji_fly_kmz(full_path) else "DJI Pilot 2",
+            "aircraft": "DJI Fly" if is_fly else "DJI Pilot 2",
             "location": location or "",
             "height": height,
             "pitch": pitch,
             "overlap": overlap,
-        })
+        }
+        row.update(_mission_log_details(full_path, base_name, is_fly, overlap))
+        rows.append(row)
     return rows
+
+
+def _mission_log_details(full_path, base_name, is_fly, filename_overlap):
+    """
+    The Mission Log's planning figures for one mission, read from the KMZ
+    with the same parser the Editor uses, so they are the numbers the
+    mission will actually fly. Any that can't be worked out are left None
+    (a blank cell) rather than guessed - an unreadable file only costs its
+    own column.
+    """
+    details = {
+        "tool": f"{'DJI Fly' if is_fly else 'DJI Pilot 2'} · Flight Planner",
+        "alt_ft": None, "gsd_cm": None, "front_ol": filename_overlap, "side_ol": None,
+        "speed_mph": None, "gimbal_pitch": None, "passes": None, "distance_ft": None,
+        "photos": None, "flight_min": None,
+    }
+    try:
+        meta = parse_kmz_for_editing(full_path)
+    except Exception:
+        logger.warning("Mission log: couldn't read %s", full_path, exc_info=True)
+        return details
+
+    coords = meta["coords"]
+    alt_ft, pitch = meta["alt_ft"], meta["pitch"]
+    speed_m = meta["speed_m"]
+    distance_ft = sum(get_haversine_dist(coords[i], coords[i + 1]) for i in range(len(coords) - 1)) * M_TO_FT
+
+    # GSD exactly as the Creator's "Est. Ground GSD" works it out.
+    pitch_rad = math.radians(abs(pitch))
+    if pitch_rad > 0:
+        slant_ft = alt_ft / math.sin(pitch_rad)
+        details["gsd_cm"] = round((slant_ft * FT_TO_M * SENSOR_W * 100) / (FOCAL_L * IMAGE_W), 2)
+
+    gap_m = photo_gap_m(meta["trigger_type"], meta["t_val"],
+                        meta["t_val"] if meta["trigger_type"] == "time" else 0.0, speed_m)
+    if meta.get("photo_mask") is not None:
+        mask = meta["photo_mask"]
+        photos = sum(1 for f in mask if f)
+        # A pass is a run of photo waypoints; the turns between them take none.
+        passes = sum(1 for i, f in enumerate(mask) if f and (i == 0 or not mask[i - 1]))
+    elif meta.get("photo_index_ranges"):
+        ranges = meta["photo_index_ranges"]
+        photos = count_mapping_photos(coords, gap_m * M_TO_FT,
+                                      mapping_connectors_from_ranges(len(coords), ranges), is_dji_fly=False)
+        passes = len(ranges)
+    elif is_fly:
+        photos = meta.get("photo_waypoints") or count_corridor_photos(coords, gap_m, True)
+        passes = 1
+    else:
+        photos = count_corridor_photos(coords, gap_m, False, meta["photo_start_wp"])
+        passes = 1
+
+    if filename_overlap is None:
+        details["front_ol"] = round(flown_forward_overlap(pitch, alt_ft, meta["side"], gap_m))
+    so = meta.get("side_overlap")
+    details["side_ol"] = so if so is not None else ("n/a (flight line)" if not meta["is_mapping"] else None)
+    details.update({
+        "alt_ft": round(alt_ft, 1),
+        "speed_mph": round(meta["speed_mph"], 1),
+        "gimbal_pitch": round(pitch),
+        "passes": passes,
+        "distance_ft": round(distance_ft),
+        "photos": photos,
+        # Same rough figure the Creator shows under the path distance: the
+        # route at cruise speed, nothing for take-off, turns or landing.
+        "flight_min": round(distance_ft * FT_TO_M / speed_m / 60, 1) if speed_m > 0 else None,
+    })
+    return details
+
+
+# Colours from the class's Mission Log handout (lab03_mission_log.xlsx).
+_MISSION_LOG_HEADER = "1F4E79"   # mission column headings
+_MISSION_LOG_LABEL = "DDEBF7"    # row labels
+_MISSION_LOG_CHECK = "F2F2F2"    # the handout's own calculated check row
+MISSION_LOG_SHEET = "Mission Log"
+MISSION_LOG_MIN_PER_BATTERY = 25
+
+
+def _build_mission_log_sheet(ws, rows, pilot_name, certificate_number):
+    """
+    The Mission Log sheet: the class handout's layout - one column per
+    mission, one row per item - with every figure the planner knows filled
+    in from the mission files, plus a flight record (where, when, how long)
+    carried over from the old one-row-per-flight log.
+
+    Returns {"date", "start", "stop", "minutes", "remarks"}: the row numbers
+    of the flight record, which the Pilot Logbook sheet reads from so a
+    flight's date and times are only typed once.
+    """
+    thin = Side(style="thin", color="B7B7B7")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def set_cell(coord, value, *, bold=False, italic=False, size=11, color="000000",
+                 fill=None, align=None, valign="center", border=False, wrap=False):
+        c = ws[coord]
+        c.value = value
+        c.font = Font(name="Arial", bold=bold, italic=italic, size=size, color=color)
+        if fill:
+            c.fill = PatternFill("solid", fgColor=fill)
+        c.alignment = Alignment(horizontal=align, vertical=valign, wrap_text=wrap)
+        if border:
+            c.border = box
+        return c
+
+    n_cols = max(len(rows), 1)
+    cols = [get_column_letter(2 + i) for i in range(n_cols)]
+    last_col = cols[-1]
+    # The legend and the pilot block need a few columns whatever the count.
+    note_end = get_column_letter(max(2 + n_cols - 1, 5))
+
+    set_cell("A1", "Mission Log", bold=True, size=14)
+    ws.merge_cells(f"A3:{note_end}3")
+    set_cell("A3", "Units follow the class flight planner: feet, miles per hour, and GSD in cm/px. "
+                   "If a controller app uses metres, note it in the cell.", wrap=True, valign="top")
+    ws.row_dimensions[3].height = 30
+
+    set_cell("A5", "Pilot", bold=True, fill=_MISSION_LOG_LABEL, border=True)
+    set_cell("B5", pilot_name, fill=_FLIGHT_LOG_GREEN, border=True)
+    set_cell("A6", "Certificate number", bold=True, fill=_MISSION_LOG_LABEL, border=True)
+    set_cell("B6", certificate_number, fill=_FLIGHT_LOG_GREEN, border=True)
+
+    set_cell("A8", "Legend", bold=True)
+    set_cell("B8", "Filled in by the app", fill=_FLIGHT_LOG_GREEN, border=True, size=9, italic=True)
+    set_cell("C8", "Fill in by hand", fill=_FLIGHT_LOG_YELLOW, border=True, size=9, italic=True)
+    set_cell("D8", "Calculated - don't edit", fill=_FLIGHT_LOG_BLUE, border=True, size=9, italic=True)
+
+    header_row = 10
+    set_cell(f"A{header_row}", "", fill=_MISSION_LOG_HEADER, border=True)
+    for i, col in enumerate(cols, start=1):
+        set_cell(f"{col}{header_row}", f"Mission {i}", bold=True, color="FFFFFF",
+                 fill=_MISSION_LOG_HEADER, align="center", border=True)
+
+    # (label, row key or None, kind). kind: "auto" = from the mission file,
+    # "hand" = the student's, "calc" = a formula, "yn" = a Y/N choice,
+    # "section" = a heading across the table.
+    layout = [
+        ("Mission name (file name)", "file_name", "auto"),
+        ("Drone and planning tool", "tool", "auto"),
+        ("Hard constraints", None, "hand"),
+        ("Mission objective", None, "hand"),
+        ("Relative altitude (ft)", "alt_ft", "auto"),
+        ("Est. ground GSD (cm/px)", "gsd_cm", "auto"),
+        ("Frontal overlap (%)", "front_ol", "auto"),
+        ("Side overlap (%)", "side_ol", "auto"),
+        ("Flight speed (mph)", "speed_mph", "auto"),
+        ("Gimbal pitch (°)", "gimbal_pitch", "auto"),
+        ("Passes", "passes", "auto"),
+        ("Total path distance (ft)", "distance_ft", "auto"),
+        ("Estimated photos", "photos", "auto"),
+        ("Flight time (min)", "flight_min", "auto"),
+        (f"Batteries needed (Assume {MISSION_LOG_MIN_PER_BATTERY} minutes per battery)", "batteries", "calc"),
+        ("All hard constraints met? (Y/N)", None, "yn"),
+        ("Most important decision, and why", None, "hand"),
+        ("Flight time check (min) – calculated by the sheet", "time_check", "calc"),
+        ("Flight record", None, "section"),
+        ("Mission location", "location", "auto"),
+        ("Date flown", "date", "hand"),
+        ("Start time", "start", "hand"),
+        ("Stop time", "stop", "hand"),
+        ("Minutes flown", "minutes", "calc"),
+        ("Remarks", "remarks", "hand"),
+    ]
+    row_of = {}
+    r = header_row + 1
+    for label, key, kind in layout:
+        row_of[key or label] = r
+        r += 1
+
+    tall = {"Hard constraints": 45, "Mission objective": 45,
+            "Most important decision, and why": 75, "Remarks": 45}
+    yn = DataValidation(type="list", formula1='"Y,N"', allow_blank=True)
+    ws.add_data_validation(yn)
+
+    for label, key, kind in layout:
+        r = row_of[key or label]
+        if kind == "section":
+            set_cell(f"A{r}", label, bold=True, color="FFFFFF", fill=_MISSION_LOG_HEADER, border=True)
+            for col in cols:
+                set_cell(f"{col}{r}", "", fill=_MISSION_LOG_HEADER, border=True)
+            continue
+        is_check = key == "time_check"
+        set_cell(f"A{r}", label, bold=not is_check, wrap=True,
+                 fill=_MISSION_LOG_CHECK if is_check else _MISSION_LOG_LABEL, border=True)
+        if label in tall:
+            ws.row_dimensions[r].height = tall[label]
+        for i, col in enumerate(cols):
+            data = rows[i] if i < len(rows) else {}
+            if kind == "auto":
+                value = data.get(key)
+                set_cell(f"{col}{r}", "" if value is None else value,
+                         fill=_FLIGHT_LOG_GREEN if data else _FLIGHT_LOG_YELLOW,
+                         border=True, align="left", wrap=True)
+            elif kind in ("hand", "yn"):
+                set_cell(f"{col}{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="left",
+                         valign="top" if label in tall else "center", wrap=True)
+                if kind == "yn":
+                    yn.add(f"{col}{r}")
+            elif key == "batteries":
+                t = f"{col}{row_of['flight_min']}"
+                set_cell(f"{col}{r}", f'=IF(ISNUMBER({t}),ROUNDUP({t}/{MISSION_LOG_MIN_PER_BATTERY},0),"")',
+                         fill=_FLIGHT_LOG_BLUE, border=True, align="left")
+            elif key == "time_check":
+                # The handout's own formula: feet / (mph x 88 ft per minute).
+                d, v = f"{col}{row_of['distance_ft']}", f"{col}{row_of['speed_mph']}"
+                set_cell(f"{col}{r}", f'=IF(AND(ISNUMBER({d}),ISNUMBER({v}),{v}>0),ROUND({d}/({v}*88),1),"")',
+                         fill=_MISSION_LOG_CHECK, border=True, align="left")
+            elif key == "minutes":
+                a, b = f"{col}{row_of['start']}", f"{col}{row_of['stop']}"
+                # MOD(..., 1) so a flight across midnight still comes out positive.
+                set_cell(f"{col}{r}", f'=IF(OR({a}="",{b}=""),"",MOD({b}-{a},1)*1440)',
+                         fill=_FLIGHT_LOG_BLUE, border=True, align="left")
+                ws[f"{col}{r}"].number_format = "0.0"
+        if key == "date":
+            for col in cols:
+                ws[f"{col}{r}"].number_format = "m/d/yyyy"
+        elif key in ("start", "stop"):
+            for col in cols:
+                ws[f"{col}{r}"].number_format = "h:mm AM/PM"
+
+    totals = r = row_of["remarks"] + 2
+    set_cell(f"A{r}", "Total flights", bold=True, fill=_MISSION_LOG_LABEL, border=True)
+    set_cell(f"B{r}", f"=COUNT(B{row_of['date']}:{last_col}{row_of['date']})",
+             fill=_FLIGHT_LOG_BLUE, border=True, align="left")
+    set_cell(f"A{r + 1}", "Total hours", bold=True, fill=_MISSION_LOG_LABEL, border=True)
+    set_cell(f"B{r + 1}", f"=SUM(B{row_of['minutes']}:{last_col}{row_of['minutes']})/60",
+             fill=_FLIGHT_LOG_BLUE, border=True, align="left")
+    ws[f"B{r + 1}"].number_format = "0.0"
+
+    ws.column_dimensions["A"].width = 34
+    for col in cols:
+        ws.column_dimensions[col].width = 28
+    for col in "CDE":
+        if ws.column_dimensions[col].width in (None, 13):
+            ws.column_dimensions[col].width = 22
+    ws.freeze_panes = f"B{header_row + 1}"
+    ws.sheet_view.showGridLines = False
+    return {k: row_of[k] for k in ("date", "start", "stop", "minutes", "remarks")}
 
 
 def build_flight_log_workbook(rows, pilot_name, certificate_number):
     """
-    The actual downloadable flight-log spreadsheet - layout and legend match
-    the reviewed mockup (green = auto-filled by the app, yellow = fill in by
-    hand), plus a third color for Minutes, which is a live formula off
-    Start/Stop Time rather than another hand-filled cell (blue = calculated,
-    don't type over it) - driven by real mission data instead of the
-    mockup's four illustrative examples.
+    The downloadable flight log: the Mission Log sheet (the class handout,
+    one column per mission) and the Pilot Logbook sheet (one row per
+    flight). The logbook's date, times and remarks are formulas reading the
+    Mission Log, so a flight is only written down once.
     """
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Flight Log"
+    log_ws = wb.active
+    log_ws.title = MISSION_LOG_SHEET
+    record = _build_mission_log_sheet(log_ws, rows, pilot_name, certificate_number)
+    _build_pilot_logbook_sheet(wb.create_sheet("Pilot Logbook"), rows, pilot_name, certificate_number, record)
+    wb.active = 0
+    return wb
+
+
+def _build_pilot_logbook_sheet(ws, rows, pilot_name, certificate_number, record):
+    """
+    The one-row-per-flight logbook - layout and legend match the reviewed
+    mockup (green = auto-filled by the app, yellow = fill in by hand, blue =
+    calculated). Date, times and remarks come from the Mission Log sheet
+    (`record` gives their rows there), so they are blue here.
+    """
     last_col = get_column_letter(len(FLIGHT_LOG_HEADERS))
 
     thin = Side(style="thin", color="B7B7B7")
@@ -4282,7 +4535,7 @@ def build_flight_log_workbook(rows, pilot_name, certificate_number):
     ws.merge_cells(f"A1:{last_col}1")
     set_cell("A1", "sUAS Pilot Logbook", bold=True, size=16, underline=True, align="left")
     ws.merge_cells(f"A2:{last_col}2")
-    set_cell("A2", "Downloaded pre-filled from the Flight Planner, one row per mission in the source folder.",
+    set_cell("A2", "One row per mission. Fill in the date, times and remarks on the Mission Log sheet - they appear here.",
               italic=True, size=9, color=_FLIGHT_LOG_GREY)
 
     set_cell("B4", "", fill=_FLIGHT_LOG_GREEN, border=True)
@@ -4290,7 +4543,7 @@ def build_flight_log_workbook(rows, pilot_name, certificate_number):
     set_cell("E4", "", fill=_FLIGHT_LOG_YELLOW, border=True)
     set_cell("F4", "Fill in by hand after the flight", italic=True, size=9, color=_FLIGHT_LOG_GREY)
     set_cell("H4", "", fill=_FLIGHT_LOG_BLUE, border=True)
-    set_cell("I4", "Calculated - don't edit", italic=True, size=9, color=_FLIGHT_LOG_GREY)
+    set_cell("I4", "Calculated or from the Mission Log - don't edit", italic=True, size=9, color=_FLIGHT_LOG_GREY)
 
     set_cell("B6", "Pilot:", bold=True, align="right")
     set_cell("C6", pilot_name, fill=_FLIGHT_LOG_GREEN, border=True)
@@ -4308,7 +4561,9 @@ def build_flight_log_workbook(rows, pilot_name, certificate_number):
     set_cell("F6", "Total Hours:", bold=True, align="right")
     set_cell("G6", f"=SUM(J{data_first_row}:J{data_last_row})/60", align="center", border=True)
     set_cell("F7", "Total Flights:", bold=True, align="right")
-    set_cell("G7", f"=COUNTA(A{data_first_row}:A{data_last_row})", align="center", border=True)
+    # COUNT, not COUNTA: the date cells are formulas, and COUNTA counts the
+    # ones still showing "" as flights.
+    set_cell("G7", f"=COUNT(A{data_first_row}:A{data_last_row})", align="center", border=True)
     ws["G6"].number_format = "0.0"
     ws["G7"].number_format = "0"
 
@@ -4319,17 +4574,22 @@ def build_flight_log_workbook(rows, pilot_name, certificate_number):
         ws.column_dimensions[col].width = w
     ws.row_dimensions[header_row].height = 30
 
+    def from_log(offset, key):
+        ref = f"'{MISSION_LOG_SHEET}'!{get_column_letter(2 + offset)}{record[key]}"
+        return f'=IF({ref}="","",{ref})'
+
     for offset, row in enumerate(rows):
         r = data_first_row + offset
-        set_cell(f"A{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="center")                     # Date
+        set_cell(f"A{r}", from_log(offset, "date"), fill=_FLIGHT_LOG_BLUE, border=True, align="center")  # Date
+        ws[f"A{r}"].number_format = "m/d/yyyy"
         set_cell(f"B{r}", row["flight_name"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")      # Flight Name
         set_cell(f"C{r}", row["aircraft"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")         # Aircraft
         set_cell(f"D{r}", row["location"], fill=_FLIGHT_LOG_GREEN, border=True, align="left")           # Mission Location
         set_cell(f"E{r}", row["height"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")           # Height
         set_cell(f"F{r}", row["pitch"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")            # Pitch
         set_cell(f"G{r}", row["overlap"], fill=_FLIGHT_LOG_GREEN, border=True, align="center")          # Overlap
-        set_cell(f"H{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="center")                     # Start Time
-        set_cell(f"I{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="center")                     # Stop Time
+        set_cell(f"H{r}", from_log(offset, "start"), fill=_FLIGHT_LOG_BLUE, border=True, align="center")  # Start Time
+        set_cell(f"I{r}", from_log(offset, "stop"), fill=_FLIGHT_LOG_BLUE, border=True, align="center")   # Stop Time
         ws[f"H{r}"].number_format = "h:mm AM/PM"
         ws[f"I{r}"].number_format = "h:mm AM/PM"
         # MOD(..., 1) rather than a plain subtraction so a flight that
@@ -4338,7 +4598,7 @@ def build_flight_log_workbook(rows, pilot_name, certificate_number):
         set_cell(f"J{r}", f'=IF(OR(H{r}="",I{r}=""),"",MOD(I{r}-H{r},1)*1440)',
                   fill=_FLIGHT_LOG_BLUE, border=True, align="center")                                    # Minutes (calculated)
         ws[f"J{r}"].number_format = "0.0"
-        set_cell(f"K{r}", "", fill=_FLIGHT_LOG_YELLOW, border=True, align="left")                       # Remarks
+        set_cell(f"K{r}", from_log(offset, "remarks"), fill=_FLIGHT_LOG_BLUE, border=True, align="left")  # Remarks
         ws.row_dimensions[r].height = 18
 
     # No missions - leave one bordered, fully-manual row so the sheet still
@@ -4357,7 +4617,6 @@ def build_flight_log_workbook(rows, pilot_name, certificate_number):
 
     ws.freeze_panes = f"A{data_first_row}"
     ws.sheet_view.showGridLines = False
-    return wb
 
 
 def line_intersection_local(p_a, bearing_a, p_b, bearing_b):
@@ -4701,6 +4960,9 @@ def parse_kmz_for_editing(full_path):
 
         if len(raw_coords) >= 2 and headings[0] is not None:
             meta['side'] = _side_from_heading(headings[0], get_bearing(raw_coords[0], raw_coords[1]))
+        # On DJI Fly this is the photo count itself (one per waypoint); on
+        # DJI Pilot only the waypoints that start a trigger carry the action.
+        meta['photo_waypoints'] = sum(has_photo)
 
         if is_fly and len(raw_coords) >= 2:
             # DJI Fly missions store every densified photo waypoint, not the
