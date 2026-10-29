@@ -5011,6 +5011,25 @@ with st.container(key="app_header"):
         if st.button("📖 User Guide", width='stretch'):
             _readme_dialog()
 
+# Streamlit forgets a widget's value on any run that doesn't draw it, so
+# visiting another tab wiped the Creator's and Editor's settings. Worse, the
+# defaults set near the top of the file then filled the gap: Editor -> Viewer
+# -> Editor left a loaded 200 ft mission showing 50 ft, and saving wrote that.
+# Re-assigning a value on the runs that don't draw its widget keeps it.
+EDITOR_WIDGET_KEYS = [
+    "edit_dir", "e_name_input", "e_alt_ft", "e_source", "e_tif", "e_bounds",
+    "e_pitch", "e_side", "e_trigger_type", "e_t_dist_val", "e_overlap_pct",
+    "e_t_time_val", "e_target_gap_ft", "editor_faa_toggle",
+]
+CREATOR_WIDGET_KEYS = CREATOR_PRESET_KEYS + [
+    "c_save_option", "creator_faa_toggle",
+]
+for _owner, _keys in (("Creator", CREATOR_WIDGET_KEYS), ("Editor", EDITOR_WIDGET_KEYS)):
+    if page != _owner:
+        for _k in _keys:
+            if _k in st.session_state:
+                st.session_state[_k] = st.session_state[_k]
+
 # --- CREATOR MODE ---
 if page == 'Creator':
     if "map_boundary" not in st.session_state:
