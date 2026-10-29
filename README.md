@@ -6,7 +6,7 @@ Works on both Windows and Mac OS. [Link to github.](https://github.com/byu-cce-d
 [Link](https://cce-byu-flight-planner.streamlit.app/) to hosted website.
 
 ## Tabs
-The app is split into 5 tabs. Click a tab to jump to its section below.
+The app is split into 4 tabs. Click a tab to jump to its section below.
 * [Creator](#the-creator)
 * [Editor](#the-editor)
 * [Viewer](#the-viewer)
@@ -15,13 +15,13 @@ The app is split into 5 tabs. Click a tab to jump to its section below.
 ## Using the Flight Planner
 The mission planner is split into three creation tabs: the *Creator*, the *Editor*, and the *Viewer*. 
 
-The *Photo Sorter* and *DJI Fly Transfer* are tabs designed specifically for getting around the restrictions and annoyances that come with the more affordable commercial drone that use the  DJI Fly app. These are explained in a later section. 
+The *DJI Fly Transfer & Photo Sorter* tab is designed specifically for getting around the restrictions and annoyances that come with the more affordable commercial drones that use the DJI Fly app. It is explained in a later section. 
 
 ### **Downloading Missions**
 
 In order to upload your missions to your drone, you will need to download them from the website. 
 This should be done at least every time you are done planning with the app, since Streamlit will remove any missions left on the site. 
-To download, up in the top left corner press the download button button. 
+To download, press the **⬇️ Download** button in the header at the top of the page, just right of the tabs (it only appears on the website). 
 You will have the option to download one mission or an entire folder of missions. 
 You may also check the checkbox to download a flight log for your missions. 
 You will then choose a download location for the folder. 
@@ -35,19 +35,22 @@ Once the app is running, the map will be centered at BYU in Provo, Utah.
 From here, you can scroll out, click, and drag the map to your desired location. 
 You may also use the search bar to jump to a specific address or latitude and longitude. 
 
+#### Choosing a Mission Type
+The first section of the sidebar, **Mission Type**, picks what you are planning:
+* **Mapping mission** (the default): draw the area to cover, and the app works out the flight lines for you from the altitude, gimbal pitch and overlaps.
+In the top left corner of the map, select the "Draw a polygon" or "Draw a rectangle" icon and outline the area.
+The flight lines may run slightly outside the shape so its edges are covered.
+* **Flight line mission**: draw the path to fly, for corridors like a street of house fronts.
 In the top left corner of the map, select the "Draw a Polyline" icon (line button).
-Use the tool to draw your flight plan.
 Clicking will create a waypoint. 
 Once you have your route finished, click on the last waypoint to finish the line. 
-The last two icons on the left will allow you to edit the line or delete the line to start over. 
-The flight line must be continuous. 
-The app will give you the option to make more, but doing so will mess with the flight plan. 
+The flight line must be continuous; draw only one.
 
-(And an option to plan cross-area mapping missions is currently present, but needs live testing.)
+On either kind, the last two icons on the left let you edit the shape or delete it to start over.
 
 #### Setting Parameters 
-Before or after the line is created, the parameters need to be set. 
-These are divided into 5 categories: Hardware, Global Config, waypoint settings, triggers and speed, and visuals. 
+Before or after the area or line is drawn, the parameters need to be set. 
+After Mission Type, they are divided into 5 sections: Hardware & Payload, Global Config, Waypoint Settings (Mapping Settings on a mapping mission), Trigger & Speed (Coverage & Speed on a mapping mission), and Visuals. 
 All parameters can be found in the scrollable sidebar to the left of the map.
 Each is explained in the following sections.
 
@@ -106,11 +109,10 @@ Thus, the drone should take off as close as possible to the first waypoint.
 * **Elevation Source**: Select between Open-Elevation (high error, Global application), USGS 3DEP (Low error, USA only), or Local GeoTIFF files for terrain-following calculations. 
 This is very important if your flight plan is not over a flat surface. 
 * **Gimbal Pitch (°)**: Angle at which the pictures will be taken. 
-* **Side of flight path**: The aircraft takes pictures to the left or right side of the path.
+* **Side of flight path**: Shown as "Camera side of flight path" on a flight line mission. Which way the camera points: *right* or *left* of the path, *parallel* (along it), or *backwards*. 
 * **Camera side of flight path**: Which way the camera points on a mapping mission.
-*parallel* aims it along each pass. 
-*right* and *left* aim the camera across the pass to that side.
-* **Yaw Side**: Same as Side of flight path, but named for the Editor - the aircraft takes pictures to the left or right side of the path.
+*parallel* aims it along each pass, *backwards* aims it back along each pass, and *right* and *left* aim the camera across the pass to that side.
+* **Yaw Side**: The Editor's name for the camera side. It is read from the mission when it loads.
 
 </td>
 <td width="40%">
@@ -175,12 +177,12 @@ In app submitting is not available, you must use another app to do so.
 <img src="images/FAA_viewer.png" alt="" width="100%">
 
 ##### Main Page Features
-* **Save Destination**: Located above the map. Use the drop down box to choose an existing mission or the default root "missions/" directory. You can create a new folder by pressing the "+" button, or browse to a custom folder location with the file icon. 
+* **Save Destination**: Located above the map. Use the drop down box to choose an existing mission folder or the default root "missions/" directory. You can create a new folder by pressing the "+" button, or (when running the app on your own computer) browse to a custom folder location with the folder icon. 
 * **Jump to Address/Latlong**: Located at the bottom of the map. Allows you to center the screen on a specific address or latitude and longitude instead of scrolling to it on the map. 
 
 
 Once your parameters are set and the flight path is drawn, the total path distance and estimated number of photos to be taken will appear above the map.
-Save the flight plan by pressing the "save and generate KMZ" button, also found on this line. 
+Save the flight plan by pressing the "Save & Generate KMZ" button, also found on this line. 
 
 ### **The Viewer**
 
@@ -203,17 +205,18 @@ FAA restrictions may also be turned on or off with a toggle to the left.
 
 <img src="images/editor_overview.png" alt="" width="100%">
 
-**DJI_FLY missions are finicky in Editor at the moment**
-
 This tab will allow you to edit previously made flight plans. 
 Many of the same parameters in the creator may be edited here, with exceptions noted below. 
 Many parts of the viewer can also be seen. 
 
 * **Flight Path**: May be edited using the coordinate data editor table to fine-tune exact latitude and longitude values. 
 You can not click and drag the waypoints
-* **Make new file?**: May be checked to create a new mission, preserving the old one. 
+* **Make new file?**: May be checked to save a new mission, preserving the old one. If the new name would be the same as the old one, "-edited" is added to it. Unchecked, the old file is replaced.
 * **Mission Name**: The name of the flight may be edited from the sidebar, just like the other parameters. 
 The suffix for the mission will be reapplied to reflect any changes made to the height, pitch, and overlap. 
+* **Mapping missions**: The passes and the turns between them are kept exactly as planned. 
+Altitude, pitch, speed, camera side and name can be changed, but the passes are not re-spaced to match, and waypoints can't be added or removed. 
+To change the area's coverage, plan it again in the Creator.
 
 ## Uploading Missions to a Enterprise Series Drone (DJI Pilot 2)
 *(This app comes with the enterprise-tier controllers, such as RC Plus and the RC Pro Smart, and only works with Enterprise series drones)*
@@ -310,13 +313,15 @@ It uses the following inputs:
 * **Photos are here**: the folder the drone's images are currently in.
 * **Put folders here**: where the new flight folders should be created.
 * **Date flown**: only photos taken on this date are sorted. Written as YYYY-MM-DD, and it starts on today's date.
-* **New flight after a gap of (minutes)**: how long a gap between two photos means a new flight. This is why the checklist asks for **30 seconds** between flights - any less and two flights land in the same folder.
+* **New flight after a gap of (seconds)**: how long a gap between two photos means a new flight. It starts at **20 seconds** (the lowest it goes is 5). This is why the checklist asks for **30 seconds** between flights - any less and two flights land in the same folder.
 
 Press **Find flights** to see what it would create - each flight's folder name, how many photos are in it, and the time of its first photo - before anything is copied.
+It also says how many photos it skipped, such as ones taken on another date or with no time recorded in them.
 Each folder is named after the date and time of its first image to begin with.
 To name one after the mission it came from, select it and press **Rename folder...**, or double-click it.
 This is where the flight order you noted on the checklist pays off.
 Then press **Sort into folders**.
+Sorting never overwrites anything: a photo already in its folder is skipped, and a different photo with the same name is saved alongside it with a number added.
 
 ## Acknowledgements
 - Luigi Pirelli for providing the photo footprint code base. 
