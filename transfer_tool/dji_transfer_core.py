@@ -66,6 +66,45 @@ logger = logging.getLogger("dji_fly_transfer")
 #
 # Requires libmtp's shared library to be installed (the same dependency the
 # `mtp-*` CLI tools already require).
+
+# DJI's USB vendor ID. Both controllers tested with this tool report it - the
+# RC 2 as 2ca3:1021 ("Controller 2"), the plain RC as 2ca3:1023. Matched on the
+# number rather than the name because libmtp's device database has no DJI
+# entry, so on macOS and Linux an unopened controller's vendor and product
+# names come back empty; the ID is the only identifying thing there is.
+DJI_USB_VENDOR_ID = 0x2CA3
+
+
+def _choose_controller(devices):
+    """
+    Which of the connected MTP devices to talk to: (index, None), or
+    (None, message) when none of them is a DJI controller.
+
+    `devices` is one dict per device, in the order the backend found them,
+    with "vendor_id", "product_id" and "name" (name may be empty). Both
+    backends used to take whichever device came first, so a phone or camera
+    plugged in alongside the controller could be scanned - or written to -
+    in its place. A DJI device wins wherever it sits in the list; with none,
+    the message names what WAS found, so the cause is visible rather than a
+    puzzling "no mission slots".
+    """
+    for index, device in enumerate(devices):
+        if device.get("vendor_id") == DJI_USB_VENDOR_ID or "dji" in (device.get("name") or "").lower():
+            return index, None
+    described = []
+    for device in devices:
+        ids = ""
+        if device.get("vendor_id") is not None:
+            ids = f"{device['vendor_id']:04x}:{device.get('product_id') or 0:04x}"
+        name = device.get("name") or "unnamed device"
+        described.append(f"{name} ({ids})" if ids else name)
+    return None, (
+        f"Found {len(devices)} USB device(s), but none is a DJI controller: "
+        + "; ".join(described)
+        + ". Unplug other phones and cameras, and check the controller is switched on."
+    )
+
+
 try:
     LIBMTP_FILETYPE_FOLDER = 0
     LIBMTP_FILETYPE_JPEG = 14
@@ -241,7 +280,17 @@ try:
             if ret != 0 or num_devices.value == 0:
                 raise MTPBridgeError("No MTP device detected.")
             try:
-                self.device = _mtp.LIBMTP_Open_Raw_Device_Uncached(ctypes.byref(raw_device_list[0]))
+                found = []
+                for i in range(num_devices.value):
+                    entry = raw_device_list[i].device_entry
+                    name = " ".join(
+                        part.decode("utf-8", "replace") for part in (entry.vendor, entry.product) if part
+                    )
+                    found.append({"vendor_id": entry.vendor_id, "product_id": entry.product_id, "name": name})
+                chosen, problem = _choose_controller(found)
+                if problem:
+                    raise MTPBridgeError(problem)
+                self.device = _mtp.LIBMTP_Open_Raw_Device_Uncached(ctypes.byref(raw_device_list[chosen]))
             finally:
                 _libc.free(ctypes.cast(raw_device_list, ctypes.c_void_p))
             if not self.device:
@@ -579,6 +628,7 @@ try:
                 pass  # already initialized on this thread
 
             device_paths = _wpd_enumerate_device_paths()
+            mgr = None
             if not device_paths:
                 # Fall back to IPortableDeviceManager in case some other
                 # machine/device combination needs it instead (see the
@@ -588,10 +638,36 @@ try:
                 if count:
                     arr = (c_wchar_p * count)()
                     arr, count = mgr.GetDevices(arr, count)
-                    device_paths = [arr[0]]
+                    device_paths = [arr[i] for i in range(count)]
             if not device_paths:
                 raise MTPBridgeError("No MTP device detected.")
-            device_id = device_paths[0]
+
+            # A WPD device path embeds the USB IDs ("...usb#vid_2ca3&pid_1021#...").
+            # Friendly names are a courtesy for the error message only - the
+            # choice itself rests on the vendor ID - so failing to read them
+            # never stops the scan.
+            found = []
+            for path in device_paths:
+                ids = re.search(r"vid_([0-9a-f]{4})&pid_([0-9a-f]{4})", path, re.IGNORECASE)
+                name = ""
+                try:
+                    mgr = mgr or _wpd_cc.CreateObject(_WpdApi.PortableDeviceManager,
+                                                      interface=_WpdApi.IPortableDeviceManager)
+                    length = mgr.GetDeviceFriendlyName(path, None, 0)[1]
+                    if length:
+                        buf = ctypes.create_unicode_buffer(length)
+                        name = mgr.GetDeviceFriendlyName(path, buf, length)[0] or buf.value
+                except Exception:
+                    logger.debug("Could not read a friendly name for %s", path, exc_info=True)
+                found.append({
+                    "vendor_id": int(ids.group(1), 16) if ids else None,
+                    "product_id": int(ids.group(2), 16) if ids else None,
+                    "name": str(name or ""),
+                })
+            chosen, problem = _choose_controller(found)
+            if problem:
+                raise MTPBridgeError(problem)
+            device_id = device_paths[chosen]
 
             client_info = _wpd_make_values()
             client_info.SetStringValue(byref(WPD_CLIENT_NAME_KEY), "Flight Planner")
@@ -816,6 +892,21 @@ WAYPOINT_PATH = ["Android", "data", "dji.go.v5", "files", "waypoint"]
 UUID_RE = re.compile(r'^[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}$', re.IGNORECASE)
 
 
+def _matches_uuid(name, uuid):
+    """
+    Folder and file names on the controller compared without regard to case.
+    The scan reports slots upper-cased, but nothing guarantees the device names
+    them that way; an exact comparison made a lower-case slot look missing.
+    """
+    return name.upper() == uuid.upper()
+
+
+def _is_preview_of(name, uuid):
+    """Whether a file name is the {uuid}.jpg preview picture for this slot, in any case."""
+    stem, ext = os.path.splitext(name)
+    return ext.lower() == ".jpg" and _matches_uuid(stem, uuid)
+
+
 def kmz_companion_path(kmz_path, new_ext=".jpg"):
     """
     Path of the file paired with a mission - its thumbnail unless told
@@ -827,6 +918,24 @@ def kmz_companion_path(kmz_path, new_ext=".jpg"):
     which a parent folder named e.g. "old.kmz backups" would trigger.
     """
     return os.path.splitext(kmz_path)[0] + new_ext
+
+
+def _drop_stale_previews(cache_dir, keep):
+    """
+    Delete cached slot pictures ({uuid}.jpg) other than those in `keep`.
+    Only files named like a slot are touched, so nothing else that happens to
+    share the cache folder is affected.
+    """
+    for name in os.listdir(cache_dir):
+        leftover = name.endswith(".part")          # from a pull that never finished
+        stem, ext = os.path.splitext(name[:-len(".part")] if leftover else name)
+        if ext.lower() != ".jpg" or not UUID_RE.match(stem):
+            continue
+        if leftover or stem.upper() not in keep:
+            try:
+                os.remove(os.path.join(cache_dir, name))
+            except OSError:
+                logger.warning("Could not remove a stale preview %s", name, exc_info=True)
 
 
 def fetch_controller_nests_and_previews(cache_dir="missions/.cache", pull_thumbnails=True):
@@ -864,15 +973,21 @@ def fetch_controller_nests_and_previews(cache_dir="missions/.cache", pull_thumbn
             for item in waypoint_children:
                 if not item["is_folder"]:
                     continue
-                if item["name"] == "map_preview":
+                if item["name"].lower() == "map_preview":
                     preview_id = item["id"]
                 elif UUID_RE.match(item["name"]):
                     nests[item["name"].upper()] = item["id"]
 
-            if not pull_thumbnails or not preview_id:
+            if not pull_thumbnails:
+                return nests, preview_id, None
+            if not preview_id:
+                # No map_preview folder means no previews to show - and any
+                # still in the cache are from some earlier scan.
+                _drop_stale_previews(cache_dir, keep=set())
                 return nests, preview_id, None
 
             preview_children = session.list_children(preview_id)
+            refreshed = set()
 
             for uuid, folder_id in nests.items():
                 cache_path = os.path.join(cache_dir, f"{uuid}.jpg")
@@ -881,28 +996,41 @@ def fetch_controller_nests_and_previews(cache_dir="missions/.cache", pull_thumbn
                 # Check A: the subfolder under map_preview named after this mission's
                 # UUID - this is the location DJI Fly's native UI actually reads
                 # mission preview thumbnails from.
-                preview_subfolder = next((it for it in preview_children if it["is_folder"] and it["name"] == uuid), None)
+                preview_subfolder = next((it for it in preview_children if it["is_folder"] and _matches_uuid(it["name"], uuid)), None)
                 if preview_subfolder:
-                    sub_match = next((it for it in session.list_children(preview_subfolder["id"]) if it["name"] == f"{uuid}.jpg"), None)
+                    sub_match = next((it for it in session.list_children(preview_subfolder["id"]) if _is_preview_of(it["name"], uuid)), None)
                     if sub_match:
                         file_id_to_pull = sub_match["id"]
 
                 # Check B: did we inject it directly into the UUID's own mission folder?
                 if file_id_to_pull is None:
-                    own_match = next((it for it in session.list_children(folder_id) if it["name"] == f"{uuid}.jpg"), None)
+                    own_match = next((it for it in session.list_children(folder_id) if _is_preview_of(it["name"], uuid)), None)
                     if own_match:
                         file_id_to_pull = own_match["id"]
 
                 # Check C: did we inject it flat into the map_preview folder?
                 if file_id_to_pull is None:
-                    flat_match = next((it for it in preview_children if it["name"] == f"{uuid}.jpg"), None)
+                    flat_match = next((it for it in preview_children if _is_preview_of(it["name"], uuid)), None)
                     if flat_match:
                         file_id_to_pull = flat_match["id"]
 
-                # If we found our custom hijacked image, pull it to the Mac
+                # If we found our custom hijacked image, pull it to the Mac.
+                # Into a side file first: a pull that fails partway would
+                # otherwise leave a truncated picture, or the previous one,
+                # under this slot's name.
                 if file_id_to_pull is not None:
-                    session.pull_file(file_id_to_pull, cache_path)
+                    partial = cache_path + ".part"
+                    if session.pull_file(file_id_to_pull, partial):
+                        os.replace(partial, cache_path)
+                        refreshed.add(uuid)
+                    elif os.path.exists(partial):
+                        os.remove(partial)
 
+            # Whatever this scan didn't just pull is from an earlier one, and
+            # may show a mission the slot no longer holds - the picture is what
+            # people pick a slot to overwrite by, so a stale one is worse than
+            # none.
+            _drop_stale_previews(cache_dir, keep=refreshed)
             return nests, preview_id, None
     except MTPBridgeError as e:
         # "No MTP device detected" is the everyday case (nothing plugged
@@ -919,6 +1047,27 @@ def fetch_controller_nests_and_previews(cache_dir="missions/.cache", pull_thumbn
         return {}, None, f"{type(e).__name__}: {e}"
 
 
+class PushResult(tuple):
+    """
+    What push_mission_to_nest returns: an (ok, message) pair - so callers that
+    unpack it as `ok, message = ...` keep working - plus:
+
+    - warnings: things that went wrong without stopping the mission landing,
+      e.g. its preview picture failing to copy. A slot whose mission arrived
+      but whose picture didn't is the one most likely to be mistaken for
+      another, so this is reported rather than folded into "Success".
+    - preview_sent: True only when the preview picture reached every place it
+      was sent, so the caller knows whether its cached copy of the slot's
+      picture now matches the controller.
+    """
+
+    def __new__(cls, ok, message, warnings=(), preview_sent=False):
+        self = super().__new__(cls, (ok, message))
+        self.warnings = list(warnings)
+        self.preview_sent = preview_sent
+        return self
+
+
 def push_mission_to_nest(local_kmz_path, target_uuid):
     """
     Pushes a local KMZ (and its paired JPG thumbnail, if present) to an
@@ -929,38 +1078,119 @@ def push_mission_to_nest(local_kmz_path, target_uuid):
     full-device enumeration those tools do and the device's tendency to
     renumber object IDs between separate connections.
 
+    Replacing a slot is delete-then-send, and the send can fail after the
+    delete - a dropped cable, a full device, a rejected file. That used to
+    leave the slot empty: the old mission gone, the new one never arrived.
+    So nothing on the controller changes until the local file has been
+    checked and the slot's current files copied to this computer, and if the
+    new mission doesn't land those copies are put back.
+
     Also garbage-collects the shared map_preview folder of stale thumbnails
     (this mission's old one, plus any orphaned from since-removed dummy
     slots) each time it's called, since that shared pool is otherwise never
     revisited and DJI Fly's own thumbnail cache appears to occasionally
     mismatch a mission to a neighboring file once it's grown large.
+
+    Returns a PushResult - an (ok, message) pair with warnings attached.
     """
+    # Imported here rather than at the top of the file: this function is also
+    # copied into the desktop helper's core, whose header doesn't carry them.
+    import tempfile
+    import zipfile
+
+    # Checked before anything on the controller is touched: a missing,
+    # unreadable or corrupt file would otherwise only be discovered after the
+    # slot it was meant to replace had already been emptied.
+    try:
+        with open(local_kmz_path, "rb") as f:
+            f.read(1)
+    except OSError as e:
+        return PushResult(False, f"Can't read the mission file ({e}). Nothing on the controller was changed.")
+    if not zipfile.is_zipfile(local_kmz_path):
+        return PushResult(False, f"{os.path.basename(local_kmz_path)} isn't a valid .kmz (it isn't a zip "
+                                 "archive). Nothing on the controller was changed.")
+
     kill_macos_hijackers()
 
     SessionClass = get_mtp_session_class()
     if SessionClass is None:
-        return False, "MTP bridge unavailable (Windows: is comtypes installed? Other platforms: is libmtp installed?)."
+        return PushResult(False, "MTP bridge unavailable (Windows: is comtypes installed? Other platforms: is libmtp installed?).")
+
+    backup_dir = None
+    purged = False
+
+    def kept_note():
+        # For failures after the purge: where the slot's old files are, so
+        # they can be put back by hand if the automatic restore couldn't.
+        if purged and backup_dir and os.path.isdir(backup_dir) and os.listdir(backup_dir):
+            return f" The slot's previous files are saved in {backup_dir}."
+        return ""
 
     try:
         with SessionClass() as session:
             waypoint_id = session.resolve_path(WAYPOINT_PATH)
             if waypoint_id is None:
-                return False, "Could not locate the 'waypoint' folder on the controller."
+                return PushResult(False, "Could not locate the 'waypoint' folder on the controller.")
 
             waypoint_children = session.list_children(waypoint_id)
-            target_folder_id = next((it["id"] for it in waypoint_children if it["is_folder"] and it["name"] == target_uuid), None)
-            map_preview_id = next((it["id"] for it in waypoint_children if it["is_folder"] and it["name"] == "map_preview"), None)
+            target = next((it for it in waypoint_children
+                           if it["is_folder"] and _matches_uuid(it["name"], target_uuid)), None)
+            map_preview_id = next((it["id"] for it in waypoint_children
+                                   if it["is_folder"] and it["name"].lower() == "map_preview"), None)
 
-            if not target_folder_id:
-                return False, "Target folder missing from controller. Please scan again."
+            if target is None:
+                return PushResult(False, "Target folder missing from controller. Please scan again.")
+            target_folder_id = target["id"]
+            # Files are named after the folder as the DEVICE spells it, not as
+            # the caller passed it in - DJI Fly pairs a slot with its .kmz by
+            # exact name.
+            slot_uuid = target["name"]
 
             # The subfolder under map_preview named after this mission's UUID - this
             # is the location DJI Fly's native UI actually reads preview thumbnails from.
-            preview_subfolder_id = session.find_child(map_preview_id, target_uuid) if map_preview_id else None
+            preview_subfolder_id = None
+            map_preview_children = session.list_children(map_preview_id) if map_preview_id else []
+            if map_preview_id:
+                preview_subfolder_id = next((it["id"] for it in map_preview_children
+                                             if it["is_folder"] and _matches_uuid(it["name"], slot_uuid)), None)
+
+            # 0. BACK UP THE SLOT
+            # Every file in the slot folder, plus this slot's own preview
+            # pictures, copied here before anything is deleted. The slot
+            # folder must back up completely or nothing proceeds - it holds
+            # the mission itself. A preview picture that won't copy only costs
+            # the picture, so that is noted rather than fatal.
+            backup_dir = tempfile.mkdtemp(prefix=f"dji_slot_{slot_uuid}_")
+            backups = []  # (local path, remote name, parent folder id)
+            backup_warnings = []
+            slot_children = session.list_children(target_folder_id)
+            for item in slot_children:
+                if item["is_folder"]:
+                    continue
+                local = os.path.join(backup_dir, f"slot_{item['name']}")
+                if not session.pull_file(item["id"], local):
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+                    return PushResult(False, f"Couldn't copy {item['name']} off the controller to keep as a "
+                                             "backup, so nothing was changed. Try again, or scan the controller first.")
+                backups.append((local, item["name"], target_folder_id))
+            own_previews = []
+            if map_preview_id:
+                own_previews += [(it, map_preview_id) for it in map_preview_children
+                                 if not it["is_folder"] and _matches_uuid(os.path.splitext(it["name"])[0], slot_uuid)]
+            if preview_subfolder_id:
+                own_previews += [(it, preview_subfolder_id) for it in session.list_children(preview_subfolder_id)
+                                 if not it["is_folder"]]
+            for n, (item, parent) in enumerate(own_previews):
+                local = os.path.join(backup_dir, f"preview{n}_{item['name']}")
+                if session.pull_file(item["id"], local):
+                    backups.append((local, item["name"], parent))
+                else:
+                    backup_warnings.append(f"couldn't back up the preview picture {item['name']}")
 
             # 1. PURGE OLD FILES
+            purged = True
             deleted_something = False
-            for item in session.list_children(target_folder_id):
+            for item in slot_children:
                 if session.delete_object(item["id"]):
                     deleted_something = True
 
@@ -985,14 +1215,14 @@ def push_mission_to_nest(local_kmz_path, target_uuid):
                 # itself) don't guarantee consistent casing between a
                 # waypoint folder's own name and the filenames we pushed
                 # against it.
-                valid_uuids = {it["name"].upper() for it in waypoint_children if it["is_folder"] and it["name"] != "map_preview"}
-                for item in session.list_children(map_preview_id):
+                valid_uuids = {it["name"].upper() for it in waypoint_children if it["is_folder"] and it["name"].lower() != "map_preview"}
+                for item in map_preview_children:
                     if item["is_folder"]:
                         continue
                     name, ext = os.path.splitext(item["name"])
                     if ext.lower() != ".jpg" or not UUID_RE.match(name):
                         continue
-                    if name.upper() == target_uuid.upper() or name.upper() not in valid_uuids:
+                    if _matches_uuid(name, slot_uuid) or name.upper() not in valid_uuids:
                         if session.delete_object(item["id"]):
                             deleted_something = True
 
@@ -1020,27 +1250,57 @@ def push_mission_to_nest(local_kmz_path, target_uuid):
             # a real JPEG so no disguise is needed).
             if platform.system() == "Darwin":
                 subprocess.run(f'xattr -c {shlex.quote(local_kmz_path)}', shell=True)
-            remote_kmz = f"{target_uuid}.kmz"
+            remote_kmz = f"{slot_uuid}.kmz"
             ok_kmz, msg_kmz = session.send_disguised_file(local_kmz_path, remote_kmz, target_folder_id)
             if not ok_kmz:
-                return False, f"KMZ transfer failed: {msg_kmz}"
+                # Put the slot back the way it was. Sent under their original
+                # names to their original folders, so DJI Fly finds the old
+                # mission exactly where it left it.
+                failed = [name for local, name, parent in backups
+                          if not session.send_disguised_file(local, name, parent)[0]]
+                if not failed:
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+                    return PushResult(False, f"KMZ transfer failed: {msg_kmz}. The slot's previous mission "
+                                             "was put back, so it is as it was before.")
+                return PushResult(False, f"KMZ transfer failed: {msg_kmz}. Putting the previous mission back "
+                                         f"also failed for {', '.join(failed)}; copies are saved in {backup_dir}.")
 
+            # The mission is in. Everything below is the preview picture, and
+            # a failure there is reported, not treated as a failed transfer.
+            warnings = list(backup_warnings)
+            preview_sent = False
             local_jpg_path = kmz_companion_path(local_kmz_path)
             if os.path.exists(local_jpg_path):
                 if platform.system() == "Darwin":
                     subprocess.run(f'xattr -c {shlex.quote(local_jpg_path)}', shell=True)
-                remote_jpg = f"{target_uuid}.jpg"
+                remote_jpg = f"{slot_uuid}.jpg"
+                picture_failures = []
+                for place, parent in (("the slot folder", target_folder_id),
+                                      ("map_preview", map_preview_id),
+                                      ("its map_preview subfolder", preview_subfolder_id)):
+                    if not parent:
+                        continue
+                    ok_jpg, msg_jpg = session.send_disguised_file(local_jpg_path, remote_jpg, parent)
+                    if not ok_jpg:
+                        picture_failures.append(f"{place} ({msg_jpg})")
+                if picture_failures:
+                    warnings.append("the preview picture didn't copy to " + "; ".join(picture_failures)
+                                    + ", so DJI Fly may show this slot with an old or blank picture")
+                else:
+                    preview_sent = True
+            else:
+                warnings.append(f"there was no preview picture next to {os.path.basename(local_kmz_path)}, "
+                                "so DJI Fly will show this slot without one")
 
-                session.send_disguised_file(local_jpg_path, remote_jpg, target_folder_id)
-                if map_preview_id:
-                    session.send_disguised_file(local_jpg_path, remote_jpg, map_preview_id)
-                if preview_subfolder_id:
-                    session.send_disguised_file(local_jpg_path, remote_jpg, preview_subfolder_id)
-
-            return True, "Success. (Reminder: Ensure DJI Fly is closed on the RC 2 before opening!)"
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            if warnings:
+                return PushResult(True, "Mission sent, but " + "; ".join(warnings) + ".",
+                                  warnings=warnings, preview_sent=preview_sent)
+            return PushResult(True, "Success. (Reminder: Ensure DJI Fly is closed on the RC 2 before opening!)",
+                              preview_sent=preview_sent)
     except MTPBridgeError as e:
         logger.warning("MTP/WPD bridge error while pushing %s to nest %s: %s", local_kmz_path, target_uuid, e)
-        return False, str(e)
+        return PushResult(False, str(e) + kept_note())
     except Exception as e:
         # Previously uncaught here - any exception besides MTPBridgeError
         # (a COM error mid-transfer, a bad file path, etc.) would propagate
@@ -1049,7 +1309,13 @@ def push_mission_to_nest(local_kmz_path, target_uuid):
         # missions in the batch. Logged with a traceback and reported back
         # as a normal failure instead.
         logger.exception("Unexpected error while pushing %s to nest %s", local_kmz_path, target_uuid)
-        return False, f"Unexpected error: {type(e).__name__}: {e}"
+        return PushResult(False, f"Unexpected error: {type(e).__name__}: {e}" + kept_note())
+    finally:
+        # A backup is only kept when it may still be needed: after a purge
+        # whose restore didn't complete. Otherwise it's clutter in a temp
+        # folder nobody looks in.
+        if backup_dir and os.path.isdir(backup_dir) and not purged:
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 _WINDOWS_ILLEGAL_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -1067,15 +1333,23 @@ def sanitize_filename_component(name):
 
 
 def get_exif_datetime(filepath):
-    """Extracts the exact time the photo was taken from EXIF data."""
+    """
+    When the photo was taken, from its EXIF data, or None.
+
+    Read through Image.getexif() and the Exif sub-IFD rather than the
+    JPEG-only _getexif(): TIFF files have no _getexif, so every .tif failed
+    here and was dropped from the sort. DateTimeOriginal lives in the Exif
+    sub-IFD; DateTimeDigitized and the main DateTime tag are the fallbacks for
+    cameras that only write those.
+    """
     try:
         with Image.open(filepath) as img:
-            exif = img._getexif()
-            if not exif:
-                return None
-            for tag, value in exif.items():
-                if tag == 36867: 
-                    return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+            exif = img.getexif()
+            sub_ifd = exif.get_ifd(0x8769)              # the Exif sub-IFD
+            for tag, source in ((36867, sub_ifd), (36868, sub_ifd), (36867, exif), (306, exif)):
+                value = source.get(tag)
+                if value:
+                    return datetime.strptime(str(value).strip("\x00 "), "%Y:%m:%d %H:%M:%S")
     except Exception:
         pass
     return None
@@ -1090,45 +1364,89 @@ def default_group_folder_name(index, group):
     return f"Group_{index + 1}_{group_start_datetime}"
 
 
-def find_photo_groups(source_folder, target_date, gap_minutes=5, progress=None):
+SORTER_DEFAULT_GAP_SECONDS = 20
+
+
+SORTER_MIN_GAP_SECONDS = 5
+
+
+SORTER_PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+
+
+SORTER_RAW_EXTENSIONS = {'.dng'}
+
+
+def find_photo_groups(source_folder, target_date, gap_seconds=SORTER_DEFAULT_GAP_SECONDS, progress=None):
     """
     Scans source_folder for images taken on target_date and splits them into
     groups wherever the gap between two sequential photos exceeds
-    gap_minutes. Read-only - nothing is copied or created on disk here, so
+    gap_seconds. Read-only - nothing is copied or created on disk here, so
     this can run on its own as a preview step before the user decides how
     (or whether) to name each group.
 
     `progress`, if given, is called with (done, total, filename) as the scan
     walks the folder - reading EXIF off a few hundred photos takes real time.
-    Raises OSError if source_folder can't be read, and returns [] when nothing
-    in it was taken on target_date; saying so is the caller's job, because
-    this runs under both a Streamlit page and a desktop window.
+    Raises OSError if source_folder can't be read, and ValueError for a gap
+    under SORTER_MIN_GAP_SECONDS.
+
+    Returns (groups, skipped). skipped counts the photos left out and why -
+    {"no_time": n, "other_date": n} - because a photo dropped without a word
+    looks, afterwards, like a photo that was never taken. Saying so is the
+    caller's job, since this runs under both a Streamlit page and a desktop
+    window.
     """
-    valid_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+    if gap_seconds < SORTER_MIN_GAP_SECONDS:
+        raise ValueError(f"The gap between flights must be at least {SORTER_MIN_GAP_SECONDS} seconds.")
 
-    image_data = []
     files = os.listdir(source_folder)
+    total = len(files)
+    done = 0
+    image_data = []
+    skipped = {"no_time": 0, "other_date": 0}
+    times_by_stem = {}
+    raws = []
 
-    for i, filename in enumerate(files):
-        ext = os.path.splitext(filename)[1].lower()
-        if ext in valid_extensions:
-            filepath = os.path.join(source_folder, filename)
-            taken_time = get_exif_datetime(filepath)
+    def keep(filename, taken_time):
+        if taken_time is None:
+            skipped["no_time"] += 1
+        elif taken_time.date() != target_date:
+            skipped["other_date"] += 1
+        else:
+            image_data.append({'path': os.path.join(source_folder, filename),
+                               'name': filename, 'time': taken_time})
 
-            if taken_time and taken_time.date() == target_date:
-                image_data.append({'path': filepath, 'name': filename, 'time': taken_time})
-
+    for filename in files:
+        stem, ext = os.path.splitext(filename)
+        ext = ext.lower()
+        if ext in SORTER_RAW_EXTENSIONS:
+            raws.append(filename)       # after the JPGs, so a partner's time is known
+            continue
+        if ext in SORTER_PHOTO_EXTENSIONS:
+            taken_time = get_exif_datetime(os.path.join(source_folder, filename))
+            if taken_time is not None:
+                times_by_stem[stem.lower()] = taken_time
+            keep(filename, taken_time)
+        done += 1
         if progress:
-            progress(i + 1, len(files), filename)
+            progress(done, total, filename)
+
+    for filename in raws:
+        stem = os.path.splitext(filename)[0].lower()
+        taken_time = times_by_stem.get(stem) or get_exif_datetime(os.path.join(source_folder, filename))
+        keep(filename, taken_time)
+        done += 1
+        if progress:
+            progress(done, total, filename)
 
     if not image_data:
-        return []
+        return [], skipped
 
-    image_data.sort(key=lambda x: x['time'])
+    # Name breaks ties, so a JPG and its raw - the same time - sit together.
+    image_data.sort(key=lambda x: (x['time'], x['name']))
 
     groups = []
     current_group = [image_data[0]]
-    gap_threshold = timedelta(minutes=gap_minutes)
+    gap_threshold = timedelta(seconds=gap_seconds)
 
     for i in range(1, len(image_data)):
         time_diff = image_data[i]['time'] - image_data[i-1]['time']
@@ -1141,7 +1459,52 @@ def find_photo_groups(source_folder, target_date, gap_minutes=5, progress=None):
     if current_group:
         groups.append(current_group)
 
-    return groups
+    return groups, skipped
+
+
+def skipped_photos_note(skipped):
+    """One sentence on the photos a scan left out, or "" if none were."""
+    parts = []
+    if skipped.get("no_time"):
+        parts.append(f"{skipped['no_time']} had no time recorded")
+    if skipped.get("other_date"):
+        parts.append(f"{skipped['other_date']} were taken on another date")
+    if not parts:
+        return ""
+    total = skipped.get("no_time", 0) + skipped.get("other_date", 0)
+    return f"{total} photo(s) were left out: " + " and ".join(parts) + "."
+
+
+_WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
+                           *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def clean_photo_folder_name(name):
+    """
+    A typed flight-folder name made safe to create on any OS, as
+    (cleaned_name, None) - or (None, reason) when no usable name is left.
+
+    Characters Windows forbids are removed, and trailing dots and spaces
+    stripped (Windows silently drops them, so "Flight 1." and "Flight 1"
+    would land in one folder). Device names like CON and COM1 are refused
+    outright rather than altered, since changing them would surprise.
+    """
+    cleaned = _WINDOWS_ILLEGAL_FILENAME_CHARS_RE.sub('', name or '').strip().rstrip('. ')
+    if not cleaned:
+        return None, ("That name is empty once the characters a folder name can't contain, "
+                      "or end with, are removed.")
+    if cleaned.split('.')[0].strip().upper() in _WINDOWS_RESERVED_NAMES:
+        return None, f"{cleaned!r} is a name Windows reserves for devices, so it can't be a folder name."
+    return cleaned, None
+
+
+def _free_photo_name(folder, name):
+    """A file name not yet used in `folder`: name, then "name (2)", "name (3)"..."""
+    stem, ext = os.path.splitext(name)
+    n = 2
+    while os.path.exists(os.path.join(folder, f"{stem} ({n}){ext}")):
+        n += 1
+    return f"{stem} ({n}){ext}"
 
 
 def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
@@ -1152,15 +1515,26 @@ def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
     that group's default auto-generated name, same as the fully automatic
     path uses for all of them.
 
-    `progress`, if given, is called with (copied, total) after each file.
-    Returns the number of images copied, for the caller to report; copying a
-    full outing moves gigabytes, so neither the count nor the progress is
-    something to leave to a print statement.
+    Never overwrites. Sorting into a folder that already holds a file of the
+    same name used to replace it silently - a re-run is harmless, but two
+    different outings' DJI_0001.JPG are not the same photo. An identical file
+    is left alone; a different one gets the new copy saved beside it under a
+    numbered name.
+
+    `progress`, if given, is called with (done, total) after each file.
+    Returns {"copied": n, "already_there": n, "renamed": n} for the caller to
+    report; copying a full outing moves gigabytes, so neither the count nor
+    the progress is something to leave to a print statement.
     """
+    # Imported here rather than at the top of the file: this function is also
+    # copied into the desktop helper's core, whose header doesn't carry it.
+    import filecmp
+
     os.makedirs(output_folder, exist_ok=True)
 
     total_images = sum(len(g) for g in groups)
-    copied = 0
+    result = {"copied": 0, "already_there": 0, "renamed": 0}
+    done = 0
 
     for i, group in enumerate(groups):
         folder_name = (group_names[i] if group_names else None) or default_group_folder_name(i, group)
@@ -1170,9 +1544,21 @@ def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
 
         for img in group:
             target_path = os.path.join(folder_path, img['name'])
+            if os.path.exists(target_path):
+                # shallow=False compares the bytes - the size check it does
+                # first makes most mismatches cheap.
+                if filecmp.cmp(img['path'], target_path, shallow=False):
+                    result["already_there"] += 1
+                    done += 1
+                    if progress:
+                        progress(done, total_images)
+                    continue
+                target_path = os.path.join(folder_path, _free_photo_name(folder_path, img['name']))
+                result["renamed"] += 1
             shutil.copy2(img['path'], target_path)
-            copied += 1
+            result["copied"] += 1
+            done += 1
             if progress:
-                progress(copied, total_images)
+                progress(done, total_images)
 
-    return copied
+    return result

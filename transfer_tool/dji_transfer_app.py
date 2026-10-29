@@ -1,11 +1,14 @@
 """
 DJI Fly Mission Transfer - a small desktop helper.
 
-Does one job: take a .kmz built in the Flight Planner (the web version
-included, which can't reach USB at all) and push it into a mission slot on a
-connected RC 2. Nothing else from the planner is here - no map, no mission
-editing - so this can be frozen into a single download that needs neither
-Python nor any libraries installed.
+Two jobs, one on each side of a flight, as two tabs. Transfer: take a .kmz
+built in the Flight Planner (the web version included, which can't reach USB
+at all) and push it into a mission slot on a connected RC 2. Sort photos:
+split an outing's photos into a folder per flight, which the web version
+can't do either, having no way to read a folder on this computer. Nothing
+else from the planner is here - no map, no mission editing - so this can be
+frozen into a single download that needs neither Python nor any libraries
+installed.
 
 Run from source:   python dji_transfer_app.py
 Build a binary:    python build_installer.py       (see that script's notes)
@@ -21,6 +24,7 @@ nothing but the main thread ever touches a widget.
 import datetime
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,15 +34,11 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import dji_transfer_core as core
 
-# Thumbnails are JPEGs and Tk can't decode those on its own, so previews are
-# a Pillow-shaped luxury rather than a requirement: without it the tool still
-# scans and transfers, it just lists slots by UUID instead of showing what is
-# currently sitting in each one.
-try:
-    from PIL import Image, ImageTk
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+# Pillow is required, not optional. Tk can't decode the JPEG previews on its
+# own, and the previews are what people choose which slot to overwrite by;
+# the photo sorter reads EXIF times with it too. The core already imports it,
+# so a "Pillow is optional" fallback here could never actually run.
+from PIL import Image, ImageTk
 
 # Somewhere disposable and always writable. Not a folder next to the program:
 # a frozen build can sit inside a read-only .app bundle or Program Files.
@@ -72,6 +72,7 @@ class TransferApp:
         self.sorter_output = None
         self.groups = []
         self.group_names = []
+        self.skipped = {}
         self.sorter_busy = False
         self.nests = {}
         self.events = queue.Queue()
@@ -182,7 +183,7 @@ class TransferApp:
         # window opens with the Transfer button pushed off the bottom.
         self.tree = ttk.Treeview(
             holder, style="Nests.Treeview", columns=("slot",), height=2,
-            show="tree headings" if PIL_AVAILABLE else "headings", selectmode="browse",
+            show="tree headings", selectmode="browse",
         )
         self.tree.heading("slot", text="Slot")
         self.tree.column("#0", width=THUMB_COLUMN_WIDTH, stretch=False)
@@ -269,9 +270,11 @@ class TransferApp:
 
         gap_row = ttk.Frame(settings)
         gap_row.pack(fill="x", padx=10, pady=(2, 8))
-        ttk.Label(gap_row, text="New flight after a gap of (minutes)").pack(side="left")
-        self.sorter_gap = ttk.Spinbox(gap_row, from_=1, to=120, width=6)
-        self.sorter_gap.set("5")
+        # Seconds: see core.SORTER_DEFAULT_GAP_SECONDS for why 20.
+        ttk.Label(gap_row, text="New flight after a gap of (seconds)").pack(side="left")
+        self.sorter_gap = ttk.Spinbox(
+            gap_row, from_=core.SORTER_MIN_GAP_SECONDS, to=600, width=6)
+        self.sorter_gap.set(str(core.SORTER_DEFAULT_GAP_SECONDS))
         self.sorter_gap.pack(side="right")
 
         # Bottom-anchored before the list, for the same reason the transfer
@@ -287,7 +290,10 @@ class TransferApp:
         groups_frame.pack(fill="both", expand=True, **pad)
         groups_bar = ttk.Frame(groups_frame)
         groups_bar.pack(fill="x", padx=10, pady=(8, 4))
-        ttk.Button(groups_bar, text="Find flights", command=self.find_groups).pack(side="left")
+        # Kept so it can be disabled during a scan: a second click used to
+        # start a second scan, and both filled the list - every flight twice.
+        self.find_button = ttk.Button(groups_bar, text="Find flights", command=self.find_groups)
+        self.find_button.pack(side="left")
         # Naming the folders before sorting is part of how these get flown -
         # the checklist tells people to note the order they flew missions in,
         # precisely so the folders can be named after them here.
@@ -340,6 +346,8 @@ class TransferApp:
             return None
 
     def find_groups(self):
+        if self.sorter_busy:
+            return
         if not self.sorter_source:
             messagebox.showinfo(WINDOW_TITLE, "Choose the folder your photos are in first.")
             return
@@ -351,10 +359,19 @@ class TransferApp:
                 "for example 2026-10-06.",
             )
             return
+        # Refused rather than quietly corrected: a gap typed wrong and
+        # silently replaced sorts every flight into the wrong folders.
         try:
-            gap = max(1, int(float(self.sorter_gap.get())))
+            gap = float(self.sorter_gap.get())
         except ValueError:
-            gap = 5
+            gap = None
+        if gap is None or gap < core.SORTER_MIN_GAP_SECONDS:
+            messagebox.showerror(
+                WINDOW_TITLE,
+                f"The gap must be a number of seconds, at least {core.SORTER_MIN_GAP_SECONDS}.\n\n"
+                f"{core.SORTER_DEFAULT_GAP_SECONDS} suits flights flown with 30 seconds between them.",
+            )
+            return
 
         source = self.sorter_source
         self._clear_groups()
@@ -369,10 +386,12 @@ class TransferApp:
             return
         groups, output, names = self.groups, self.sorter_output, list(self.group_names)
         total = sum(len(g) for g in groups)
+        note = core.skipped_photos_note(self.skipped)
         if not messagebox.askyesno(
             WINDOW_TITLE,
             f"Copy {total} photos into {len(groups)} folders under:\n\n{output}\n\n"
-            "The originals stay where they are.",
+            + (f"{note} They won't be copied.\n\n" if note else "")
+            + "The originals stay where they are.",
         ):
             return
         self._set_sorter_busy(True, f"Copying {total} photos - this can take a while...")
@@ -390,11 +409,16 @@ class TransferApp:
             WINDOW_TITLE, "Folder name for this flight:", initialvalue=current, parent=self.root)
         if typed is None:
             return
-        # Same cleaning the planner applies to a typed mission name, so a
-        # folder named here can't be one the OS refuses to create.
-        cleaned = core.sanitize_filename_component(typed)
-        taken = {n for i, n in enumerate(self.group_names) if i != index}
-        if cleaned in taken:
+        # Cleaned so a folder named here can't be one the OS refuses to
+        # create; a name that can't be saved is refused with the reason.
+        cleaned, reason = core.clean_photo_folder_name(typed)
+        if reason:
+            messagebox.showerror(WINDOW_TITLE, reason)
+            return
+        # Ignoring case: Windows and macOS would put "Flight A" and
+        # "flight a" in the same folder.
+        taken = {n.casefold() for i, n in enumerate(self.group_names) if i != index}
+        if cleaned.casefold() in taken:
             messagebox.showerror(
                 WINDOW_TITLE,
                 f"Another flight is already going into a folder called {cleaned!r}.\n\n"
@@ -410,19 +434,25 @@ class TransferApp:
 
     # -------------------------------------------------------- sorter results
 
-    def _groups_found(self, groups, error):
+    def _groups_found(self, result, error):
         self._set_sorter_busy(False)
+        # Cleared here as well as when the scan starts, so whatever happened
+        # in between, the list only ever shows this scan's flights.
+        self._clear_groups()
         if error is not None:
             self._set_sorter_status(f"Could not read that folder: {error}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Could not read that folder:\n\n{error}")
             return
+        groups, self.skipped = result
+        note = core.skipped_photos_note(self.skipped)
         self.groups = groups or []
         if not self.groups:
             self._set_sorter_status("No photos from that date in that folder.", error=True)
             messagebox.showinfo(
                 WINDOW_TITLE,
                 "No photos in that folder were taken on that date.\n\nCheck the date, and "
-                "that you picked the folder the photos are actually in.",
+                "that you picked the folder the photos are actually in."
+                + (f"\n\n{note}" if note else ""),
             )
             return
         self.group_names = [core.default_group_folder_name(i, g) for i, g in enumerate(self.groups)]
@@ -432,21 +462,30 @@ class TransferApp:
             ))
         total = sum(len(g) for g in self.groups)
         self._set_sorter_status(
-            f"{len(self.groups)} flights, {total} photos. Rename any folder you want, "
-            "choose where they go, then sort.")
+            f"{len(self.groups)} flights, {total} photos. "
+            + (f"{note} " if note else "")
+            + "Rename any folder you want, choose where they go, then sort.",
+            error=bool(note))
         self._refresh_sort_button()
         self._refresh_rename_button()
 
-    def _sort_done(self, copied, error):
+    def _sort_done(self, result, error):
         self._set_sorter_busy(False)
         if error is not None:
             self._set_sorter_status(f"Sorting failed: {error}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Sorting failed:\n\n{error}")
             return
-        self._set_sorter_status(f"Sorted {copied} photos into {len(self.groups)} folders.")
+        extra = ""
+        if result["already_there"]:
+            extra += f"\n\n{result['already_there']} were already there, identical, and were left alone."
+        if result["renamed"]:
+            extra += (f"\n\n{result['renamed']} had the same name as a different photo already "
+                      "in the folder, so they were saved with a number added instead of replacing it.")
+        self._set_sorter_status(f"Sorted {result['copied']} photos into {len(self.groups)} folders.")
         messagebox.showinfo(
             WINDOW_TITLE,
-            f"Sorted {copied} photos into {len(self.groups)} folders in:\n\n{self.sorter_output}\n\n"
+            f"Sorted {result['copied']} photos into {len(self.groups)} folders in:\n\n"
+            f"{self.sorter_output}{extra}\n\n"
             "Name each folder after the mission it came from, then upload it.",
         )
 
@@ -456,6 +495,7 @@ class TransferApp:
         self.groups_tree.delete(*self.groups_tree.get_children())
         self.groups = []
         self.group_names = []
+        self.skipped = {}
         self._refresh_sort_button()
 
     def _set_sorter_status(self, text, error=False):
@@ -465,6 +505,7 @@ class TransferApp:
         self.sorter_busy = busy
         if status:
             self._set_sorter_status(status)
+        self.find_button.state(["disabled" if busy else "!disabled"])
         self._refresh_sort_button()
 
     def _refresh_sort_button(self):
@@ -598,7 +639,7 @@ class TransferApp:
         self._set_busy(True, "Scanning controller - this takes a few seconds...")
         self._run_bg(
             lambda: core.fetch_controller_nests_and_previews(
-                cache_dir=CACHE_DIR, pull_thumbnails=PIL_AVAILABLE,
+                cache_dir=CACHE_DIR, pull_thumbnails=True,
             ),
             self._scan_done,
         )
@@ -616,8 +657,12 @@ class TransferApp:
             "Whatever is in the slot now will be overwritten.",
         ):
             return
+        # Captured now: the mission or slot picked in the window may change
+        # while the push runs, and the result belongs to these two.
+        kmz_path = self.kmz_path
         self._set_busy(True, "Transferring - do not unplug the controller...")
-        self._run_bg(lambda: core.push_mission_to_nest(self.kmz_path, uuid), self._transfer_done)
+        self._run_bg(lambda: core.push_mission_to_nest(kmz_path, uuid),
+                     lambda result, error: self._transfer_done(result, error, uuid, kmz_path))
 
     # ------------------------------------------------- background plumbing
 
@@ -671,22 +716,28 @@ class TransferApp:
         self._populate_nests(nests)
         self._set_status(f"Found {len(nests)} mission slot(s). Choose one, then transfer.")
 
-    def _transfer_done(self, result, error):
+    def _transfer_done(self, result, error, uuid, kmz_path):
         self._set_busy(False)
+        # Whatever happened, the picture this window showed for the slot may
+        # no longer be what the controller holds - see _refresh_slot_preview.
+        self._refresh_slot_preview(uuid, kmz_path, result)
         if error is not None:
             self._set_status(f"Transfer failed: {error}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Transfer failed:\n\n{error}")
             return
 
         ok, message = result
-        if ok:
+        find_it = ("Open DJI Fly on the controller to find it in the mission list. If it "
+                   "doesn't appear straight away, back out of the mission list and open it again.")
+        if ok and result.warnings:
+            # The mission is on the controller, but not cleanly - most often
+            # its preview picture didn't copy, which is exactly the slot that
+            # gets mistaken for another next time. Said loudly, not as success.
+            self._set_status("Mission sent, with a problem - see the message.", error=True)
+            messagebox.showwarning(WINDOW_TITLE, f"{message}\n\n{find_it}")
+        elif ok:
             self._set_status("Transfer complete.")
-            messagebox.showinfo(
-                WINDOW_TITLE,
-                "Mission transferred.\n\nOpen DJI Fly on the controller to find it in "
-                "the mission list. If it doesn't appear straight away, back out of "
-                "the mission list and open it again.",
-            )
+            messagebox.showinfo(WINDOW_TITLE, f"Mission transferred.\n\n{find_it}")
         else:
             self._set_status(f"Transfer failed: {message}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Transfer failed:\n\n{message}")
@@ -715,8 +766,6 @@ class TransferApp:
             self.tree.insert("", "end", iid=uuid, image=image or "", values=(label,))
 
     def _load_thumbnail(self, uuid):
-        if not PIL_AVAILABLE:
-            return None
         path = os.path.join(CACHE_DIR, f"{uuid}.jpg")
         if not os.path.exists(path):
             return None
@@ -729,6 +778,38 @@ class TransferApp:
         except Exception:
             core.logger.exception("could not load preview for %s", uuid)
             return None
+
+    def _refresh_slot_preview(self, uuid, kmz_path, result):
+        """
+        Bring one slot's row up to date after a transfer, without a full rescan.
+
+        The cached picture is what people choose a slot by, so after a push it
+        must not go on showing the mission that was just replaced. When the
+        new picture reached the controller, the cache gets exactly the file
+        that was sent; otherwise the slot's state isn't known from here, so
+        its picture is cleared and the row says to scan again, rather than
+        guess.
+        """
+        cached = os.path.join(CACHE_DIR, f"{uuid}.jpg")
+        sent = bool(result) and result[0] and getattr(result, "preview_sent", False)
+        try:
+            source = core.kmz_companion_path(kmz_path)
+            if sent and os.path.exists(source):
+                shutil.copyfile(source, cached)
+            elif os.path.exists(cached):
+                os.remove(cached)
+        except OSError:
+            core.logger.exception("could not update the cached preview for %s", uuid)
+        if not self.tree.exists(uuid):
+            return
+        number = self.tree.index(uuid) + 1
+        image = self._load_thumbnail(uuid)
+        if image is not None:
+            self._thumbnails.append(image)
+            label = f"Slot {number}"
+        else:
+            label = f"Slot {number}   (scan again to see its picture)"
+        self.tree.item(uuid, image=image or "", values=(label,))
 
     def _selected_uuid(self):
         selection = self.tree.selection()

@@ -72,8 +72,12 @@ BLOCKS = [
     ("span", ("# MTP BRIDGE (direct libmtp bindings", "get_mtp_session_class")),
     ("def", "kill_macos_hijackers"),
     ("span", ("# The path, as a chain of folder names", "UUID_RE")),
+    ("def", "_matches_uuid"),
+    ("def", "_is_preview_of"),
     ("def", "kmz_companion_path"),
+    ("def", "_drop_stale_previews"),
     ("def", "fetch_controller_nests_and_previews"),
+    ("def", "PushResult"),
     ("def", "push_mission_to_nest"),
     # Photo sorter. Streamlit-free since the progress reporting moved to
     # callbacks, which is what lets them be copied rather than rewritten.
@@ -81,7 +85,15 @@ BLOCKS = [
     ("def", "sanitize_filename_component"),
     ("def", "get_exif_datetime"),
     ("def", "default_group_folder_name"),
+    ("def", "SORTER_DEFAULT_GAP_SECONDS"),
+    ("def", "SORTER_MIN_GAP_SECONDS"),
+    ("def", "SORTER_PHOTO_EXTENSIONS"),
+    ("def", "SORTER_RAW_EXTENSIONS"),
     ("def", "find_photo_groups"),
+    ("def", "skipped_photos_note"),
+    ("def", "_WINDOWS_RESERVED_NAMES"),
+    ("def", "clean_photo_folder_name"),
+    ("def", "_free_photo_name"),
     ("def", "copy_photo_groups"),
 ]
 
