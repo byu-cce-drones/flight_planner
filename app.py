@@ -48,7 +48,6 @@ import matplotlib
 # true even if these imports are ever reordered (an autoformatter's import
 # sort would do it) or the app is ever run standalone without Streamlit.
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 import textwrap
 import ctypes
@@ -512,7 +511,7 @@ except Exception:
 try:
     import comtypes
     import comtypes.client as _wpd_cc
-    from ctypes import byref, c_ulong, c_ubyte, c_wchar_p
+    from ctypes import byref, c_ubyte, c_wchar_p
 
     _wpd_cc.GetModule("PortableDeviceApi.dll")
     _wpd_cc.GetModule("PortableDeviceTypes.dll")
@@ -2733,18 +2732,6 @@ def clean_photo_folder_name(name):
     if cleaned.split('.')[0].strip().upper() in _WINDOWS_RESERVED_NAMES:
         return None, f"{cleaned!r} is a name Windows reserves for devices, so it can't be a folder name."
     return cleaned, None
-
-
-def _sorted_photos_message(result, groups, output_folder):
-    """What the page says after a sort, now that copy_photo_groups is silent."""
-    message = (f"Successfully sorted {result['copied']} images into {len(groups)} folders "
-               f"at '{output_folder}'.")
-    if result.get("already_there"):
-        message += f" {result['already_there']} were already there, identical, and were left alone."
-    if result.get("renamed"):
-        message += (f" {result['renamed']} had the same name as a different file already there, "
-                    "so they were saved with a number added rather than overwrite it.")
-    return message
 
 
 def _free_photo_name(folder, name):
@@ -5735,9 +5722,9 @@ with st.container(key="app_header"):
         # No Photo Sorter tab on this fork: it sorts folders on whatever machine
         # runs the app, which here is the server - it offered every visitor a
         # view of /home/appuser and a button that would act on it. The desktop
-        # app does that job now, and the tab below hands the app out. The page
-        # block itself is left in place, unreachable, so merges from upstream
-        # stay small; deleting it would conflict on every one.
+        # app does that job now, and the tab below hands the app out. The
+        # sorting functions stay in this file because build_core.py copies
+        # them into the desktop app's core.
         page = st.radio("Navigation", ["Creator", "Editor", "Viewer  |", "DJI Fly Transfer & Photo Sorter"], horizontal=True, label_visibility="collapsed")
     if header_download_col is not None:
         with header_download_col:
@@ -7732,185 +7719,6 @@ elif page == 'Viewer  |':
                         st.session_state.viewer_zoom = map_data_view["zoom"]
                         c_lat, c_lon = st.session_state.viewer_center
                         st.sidebar.info(f"Current Screen Center: {c_lat:.6f}, {c_lon:.6f} (Click 'Update' in sidebar to update restrictions in this area)")
-
-# ==========================================
-# PHOTO SORTER MODE
-# ==========================================
-elif page == 'Photo Sorter':
-    with st.container(key="page_body"):
-        st.header("Photo Sorter")
-        st.write("Automatically group drone photos into separate folders based on the time they were taken.")
-        st.write("This is for specifically for drones the use DJI Fly.")
-
-        # Initialize default paths in session state so they don't reset
-        if "sorter_source" not in st.session_state:
-            st.session_state.sorter_source = os.path.expanduser("~")
-        if "sorter_output" not in st.session_state:
-            st.session_state.sorter_output = os.path.join(os.path.expanduser("~"), "Output")
-        if "sorter_groups" not in st.session_state:
-            st.session_state.sorter_groups = []
-
-        def pick_source_folder():
-            folder_path = pick_folder_dialog("Select Source Directory")
-            if folder_path:
-                st.session_state.sorter_source = folder_path
-
-        def pick_output_folder():
-            folder_path = pick_folder_dialog("Select Output Directory")
-            if folder_path:
-                st.session_state.sorter_output = folder_path
-
-        col1, col2 = st.columns(2)
-    
-        with col1:
-            c1_text, c1_btn = st.columns([5, 1])
-            with c1_text:
-                st.text_input("Source Directory (Where the photos are currently)", key="sorter_source")
-            with c1_btn:
-                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                st.button("📂", key="btn_pick_source", on_click=pick_source_folder, help="Browse for Source Directory")
-            
-            target_date = st.date_input("Target Date")
-
-        with col2:
-            c2_text, c2_btn = st.columns([5, 1])
-            with c2_text:
-                st.text_input("Output Directory (Where to create the group folders)", key="sorter_output")
-            with c2_btn:
-                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                st.button("📂", key="btn_pick_output", on_click=pick_output_folder, help="Browse for Output Directory")
-            
-            # Seconds, matching the desktop helper's Sort photos tab - see
-            # SORTER_DEFAULT_GAP_SECONDS for why 20 and not minutes.
-            gap_seconds = st.number_input(
-                "Time Gap (seconds)", min_value=SORTER_MIN_GAP_SECONDS,
-                value=SORTER_DEFAULT_GAP_SECONDS, step=1,
-                help="If the time between two sequential photos exceeds this gap, a new folder is "
-                     "created. Leave 30 seconds between flights and the default of 20 splits them."
-            )
-        
-        st.write("---")
-        st.checkbox(
-            "Name each group myself before sorting",
-            key="sorter_manual_naming",
-            help="After the groups are found, review each one's first photo and give it a custom "
-                 "folder name before anything gets copied - instead of the automatic Group_1, "
-                 "Group_2... names.",
-        )
-        manual_naming = st.session_state.sorter_manual_naming
-
-        find_btn = st.button("🔍 Find Groups" if manual_naming else "🚀 Sort Photos", width='stretch')
-
-        if find_btn:
-            source_dir = st.session_state.sorter_source
-            output_dir = st.session_state.sorter_output
-
-            if not source_dir or not os.path.exists(source_dir):
-                st.error("The source directory does not exist or is invalid.")
-            elif not output_dir:
-                st.error("Please provide an output directory.")
-            else:
-                with st.spinner("Scanning for photo groups..."):
-                    scan_progress = st.progress(0, text="Scanning files for EXIF data...")
-                    skipped = {}
-                    try:
-                        groups, skipped = find_photo_groups(
-                            source_dir, target_date, gap_seconds,
-                            progress=lambda done, total, name: scan_progress.progress(
-                                done / total, text=f"Scanning files... ({done}/{total})"),
-                        )
-                    except OSError as e:
-                        scan_progress.empty()
-                        st.error(f"Error accessing source directory: {e}")
-                        groups = []
-                    else:
-                        scan_progress.empty()
-                        if groups:
-                            st.info(f"Found {len(groups)} distinct flight groups.")
-                        else:
-                            st.warning(
-                                f"No images found for {target_date.strftime('%Y-%m-%d')} "
-                                "in the source folder."
-                            )
-                        if skipped_photos_note(skipped):
-                            st.caption(skipped_photos_note(skipped))
-                if manual_naming:
-                    # Stashed for the naming review below rather than sorted
-                    # immediately - copying only happens once the user hits
-                    # "Create Folders" there.
-                    st.session_state.sorter_groups = groups
-                elif groups:
-                    copy_progress = st.progress(0, text="Copying images to group folders...")
-                    result = copy_photo_groups(
-                        groups, output_dir,
-                        progress=lambda done, total: copy_progress.progress(
-                            done / total, text=f"Copying images... ({done}/{total})"),
-                    )
-                    copy_progress.empty()
-                    st.success(_sorted_photos_message(result, groups, output_dir))
-
-        if manual_naming and st.session_state.sorter_groups:
-            groups = st.session_state.sorter_groups
-            st.write("---")
-            st.subheader("Name Your Groups")
-            st.caption("Each group's first photo is shown for reference. Leave a name as-is to keep the automatic one.")
-
-            for i, group in enumerate(groups):
-                thumb_col, name_col = st.columns([1, 4])
-                with thumb_col:
-                    try:
-                        thumb = Image.open(group[0]['path'])
-                        thumb.thumbnail((120, 120))
-                        st.image(thumb, width=100)
-                    except Exception:
-                        st.caption("Preview unavailable")
-                with name_col:
-                    st.text_input(
-                        f"Group {i + 1} name ({len(group)} photos)",
-                        value=default_group_folder_name(i, group),
-                        key=f"sorter_group_name_{i}",
-                    )
-
-            if st.button("✅ Create Folders", width='stretch'):
-                raw_names = [st.session_state.get(f"sorter_group_name_{i}", "") for i in range(len(groups))]
-                # A box left blank takes the automatic name; anything typed
-                # has to survive clean_photo_folder_name, or the user is told
-                # why rather than given a folder they didn't ask for.
-                final_names, bad_names = [], []
-                for i, n in enumerate(raw_names):
-                    if not n.strip():
-                        final_names.append(default_group_folder_name(i, groups[i]))
-                        continue
-                    cleaned, reason = clean_photo_folder_name(n)
-                    if reason:
-                        bad_names.append(f"Group {i + 1}: {reason}")
-                    final_names.append(cleaned)
-
-                # Compared ignoring case: Windows and macOS treat "Flight A"
-                # and "flight a" as one folder, so they'd quietly merge.
-                name_counts = {}
-                for name in final_names:
-                    if name:
-                        name_counts[name.casefold()] = name_counts.get(name.casefold(), 0) + 1
-                duplicates = sorted({name for name in final_names
-                                     if name and name_counts[name.casefold()] > 1})
-
-                if bad_names:
-                    st.error(" ".join(bad_names))
-                elif duplicates:
-                    st.error("These group names are used more than once (capitals don't count as a "
-                             f"difference) - make each one unique: {', '.join(duplicates)}")
-                else:
-                    copy_progress = st.progress(0, text="Copying images to group folders...")
-                    result = copy_photo_groups(
-                        groups, st.session_state.sorter_output, final_names,
-                        progress=lambda done, total: copy_progress.progress(
-                            done / total, text=f"Copying images... ({done}/{total})"),
-                    )
-                    copy_progress.empty()
-                    st.success(_sorted_photos_message(
-                        result, groups, st.session_state.sorter_output))
-                    st.session_state.sorter_groups = []
 
     # ==========================================
     # BATCH TRANSFER MODE

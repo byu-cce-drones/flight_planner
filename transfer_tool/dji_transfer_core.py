@@ -442,7 +442,7 @@ except Exception:
 try:
     import comtypes
     import comtypes.client as _wpd_cc
-    from ctypes import byref, c_ulong, c_ubyte, c_wchar_p
+    from ctypes import byref, c_ubyte, c_wchar_p
 
     _wpd_cc.GetModule("PortableDeviceApi.dll")
     _wpd_cc.GetModule("PortableDeviceTypes.dll")
