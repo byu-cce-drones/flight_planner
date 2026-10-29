@@ -3,3 +3,5 @@ build/
 dist/
 *.spec
 __pycache__/
+# The Windows build venv (see WINDOWS_BUILD_TODO.md)
+.venv-build/

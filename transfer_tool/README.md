@@ -158,6 +158,10 @@ The build generates comtypes' WPD wrappers itself and bundles them, so the
 
 ### Publishing a build
 
+> **Pending:** `transfer-tool-v4` has a new macOS build but still the old
+> Windows `.exe`. [WINDOWS_BUILD_TODO.md](WINDOWS_BUILD_TODO.md) has the steps
+> to build and upload the Windows one.
+
 The planner's DJI Fly Transfer tab links to the **latest GitHub release** by
 fixed asset names, so upload each build to a release under exactly these
 names (rename the files from `dist/` when attaching them):
