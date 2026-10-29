@@ -3366,10 +3366,23 @@ CREATOR_PRESET_KEYS = [
     "t_val_sec", "auto_speed", "target_gap_ft", "manual_mph_time",
     "map_front_ol", "map_side_ol", "map_speed_mph",
     "map_fix_bearing", "map_bearing", "map_runout_on", "map_runout",
+    "map_decompose",
 ]
 
 
+# On a hosted deployment these settings files would sit next to app.py, shared
+# by every visitor: one student's pilot name and certificate number pre-filled
+# the next student's flight logs, anyone could overwrite or delete anyone's
+# presets, and "Reset All Local Settings" wiped them for the whole class. In
+# MULTI_USER_MODE they are kept in the browser session instead - private to
+# the tab, and gone when it closes, like the session's missions.
+_HOSTED_PRESETS_KEY = "_hosted_creator_presets"
+_HOSTED_PILOT_INFO_KEY = "_hosted_pilot_info"
+
+
 def load_creator_presets():
+    if MULTI_USER_MODE:
+        return dict(st.session_state.get(_HOSTED_PRESETS_KEY, {}))
     if not os.path.exists(CREATOR_PRESETS_FILE):
         return {}
     try:
@@ -5456,7 +5469,7 @@ if page == 'Creator':
             tuple(tuple(p) for p in (st.session_state.map_boundary or ())),
             (safe_get_float('map_alt_ft', 100.0), safe_get_float('map_pitch', -90.0),
              safe_get_float('map_front_ol', 75.0), safe_get_float('map_side_ol', 65.0),
-             side, map_runout, map_bearing) if mapping_mode else None,
+             side, map_runout, map_bearing, bool(map_decompose)) if mapping_mode else None,
             st.session_state.measure_mode,
             tuple(st.session_state.measure_points),
             tuple(tuple(p) for p in (st.session_state.corridor_line or ())),
