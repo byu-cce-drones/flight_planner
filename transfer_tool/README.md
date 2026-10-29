@@ -36,9 +36,12 @@ folder on your computer either.
    macOS only lets one program talk to the controller at a time, and Preview
    alone being open is enough to stop the transfer.
 4. Plug the controller into the computer and switch it on.
-5. In the helper: **Choose .kmz...** for a single mission, or **Choose
-   folder...** to pick from a folder you have been saving missions into. Then
-   **Scan controller**, pick a slot, then **Transfer to controller**.
+5. In the helper: **Add missions...** (one or more `.kmz` files) or **Add a
+   folder...**, then **Scan controller**. Pair missions with slots in the
+   transfer plan - **Assign selected ➔** for one pair, or **Assign the rest in
+   order** - and press **Transfer to controller**. The plan is sent one
+   mission at a time; each row shows whether it arrived, and Transfer again
+   retries only the ones that failed.
 6. Open the mission list in DJI Fly. If the mission is not there straight
    away, back out of the list and open it again.
 

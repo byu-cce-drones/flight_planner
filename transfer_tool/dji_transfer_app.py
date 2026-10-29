@@ -1,9 +1,10 @@
 """
 DJI Fly Mission Transfer - a small desktop helper.
 
-Two jobs, one on each side of a flight, as two tabs. Transfer: take a .kmz
-built in the Flight Planner (the web version included, which can't reach USB
-at all) and push it into a mission slot on a connected RC 2. Sort photos:
+Two jobs, one on each side of a flight, as two tabs. Transfer: take the .kmz
+missions built in the Flight Planner (the web version included, which can't
+reach USB at all) and push them into mission slots on a connected RC 2 - one,
+or a whole plan of them in one go. Sort photos:
 split an outing's photos into a folder per flight, which the web version
 can't do either, having no way to read a folder on this computer. Nothing
 else from the planner is here - no map, no mission editing - so this can be
@@ -22,6 +23,7 @@ Workers therefore talk back through a Queue that the UI drains on a timer;
 nothing but the main thread ever touches a widget.
 """
 import datetime
+import functools
 import os
 import queue
 import shutil
@@ -29,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
@@ -56,8 +59,17 @@ THUMB_MAX_WIDTH = 240
 THUMB_COLUMN_WIDTH = THUMB_MAX_WIDTH + 16
 # Enough for the slot number and nothing more; the rest goes to the preview.
 SLOT_COLUMN_WIDTH = 150
+# Mission names are long (they carry the _Fly_H..A..OL.. suffix), so the
+# mission list's name column is wider than the slot list's.
+MISSION_NAME_COLUMN_WIDTH = 230
 WINDOW_TITLE = "DJI Fly Mission Transfer & Photo Sorter"
-MIN_WIDTH = 620
+# The mission list and the slot list sit side by side, each a preview plus a
+# name column wide.
+MIN_WIDTH = 2 * THUMB_COLUMN_WIDTH + MISSION_NAME_COLUMN_WIDTH + SLOT_COLUMN_WIDTH + 90
+# Between missions in a batch: the controller's MediaStore is still settling
+# from the last push's deletes and writes, and back-to-back pushes are where
+# files have gone missing before.
+BATCH_PAUSE_SECONDS = 1.5
 # Tall enough to show a few slots at once - used whenever the screen allows.
 PREFERRED_HEIGHT = 700
 WINDOW_CHROME_HEIGHT = 40
@@ -66,8 +78,15 @@ WINDOW_CHROME_HEIGHT = 40
 class TransferApp:
     def __init__(self, root):
         self.root = root
-        self.kmz_path = None
-        self.folder = None
+        # Missions added to the list, in the order they were added
+        # (path -> display name), and the slots found by the last scan.
+        self.missions = {}
+        self.slot_numbers = {}
+        # The transfer plan: plan row id -> (mission path, slot uuid), and the
+        # rows already sent successfully, which stay listed as a checklist.
+        self.plan_items = {}
+        self.plan_done = set()
+        self._plan_counter = 0
         self.sorter_source = None
         self.sorter_output = None
         self.groups = []
@@ -103,51 +122,86 @@ class TransferApp:
         self._build_sorter_ui(sorter_tab)
 
     def _build_transfer_ui(self, outer):
+        """
+        Three steps: the missions to send, the slots on the controller, and a
+        plan pairing them up - then one button sends the whole plan, one
+        mission at a time. A mission or slot that's in the plan drops out of
+        its list, so nothing can be sent twice or into the same slot twice.
+        """
         pad = {"padx": 12, "pady": 6}
 
-        # Step 1 - the mission file
-        step1 = ttk.LabelFrame(outer, text="1.  Mission file")
-        step1.pack(fill="x", **pad)
-
-        # Two ways in, because missions arrive two ways: one-off downloads
-        # (pick the file) and a folder the planner has been saving into all
-        # session (pick the folder once, then work through its missions
-        # without re-navigating a file dialog for each one).
-        row = ttk.Frame(step1)
-        row.pack(fill="x", padx=10, pady=(8, 2))
-        self.file_label = ttk.Label(row, text="No mission chosen", foreground="grey")
-        self.file_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Choose .kmz...", command=self.choose_file).pack(side="right")
-
-        folder_row = ttk.Frame(step1)
-        folder_row.pack(fill="x", padx=10, pady=(2, 2))
-        self.folder_label = ttk.Label(
-            folder_row, text="or choose a folder of missions", foreground="grey",
-        )
-        self.folder_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(folder_row, text="Choose folder...", command=self.choose_folder).pack(side="right")
-
-        pick_row = ttk.Frame(step1)
-        pick_row.pack(fill="x", padx=10, pady=(2, 8))
-        self.folder_pick = ttk.Combobox(pick_row, state="disabled", values=())
-        self.folder_pick.pack(fill="x")
-        self.folder_pick.bind("<<ComboboxSelected>>", self._folder_file_chosen)
-
-        # Step 3 and the status line are packed against the bottom BEFORE the
-        # slot list claims its space. pack() hands out space in call order, so
-        # with the expanding list added first the button gets pushed off the
-        # window entirely once the list has any real height to it.
+        # The status line, the button and the plan are packed against the
+        # bottom BEFORE the two lists claim their space. pack() hands out space
+        # in call order, so with the expanding lists added first the button
+        # gets pushed off the window entirely once the lists have any height.
         self.status = ttk.Label(outer, text="Ready.", foreground="grey", anchor="w")
         self.status.pack(side="bottom", fill="x", padx=12, pady=(0, 10))
+        bottom = ttk.Frame(outer)
+        bottom.pack(side="bottom", fill="x", **pad)
+        self.progress = ttk.Progressbar(bottom, mode="determinate")
+        self.progress.pack(fill="x", pady=(0, 6))
         self.transfer_button = ttk.Button(
-            outer, text="Transfer to controller", command=self.transfer, state="disabled",
+            bottom, text="Transfer to controller", command=self.transfer, state="disabled",
         )
-        self.transfer_button.pack(side="bottom", fill="x", **pad)
+        self.transfer_button.pack(fill="x")
+
+        # Step 3 - the plan
+        step3 = ttk.LabelFrame(outer, text="3.  Transfer plan - which mission goes into which slot")
+        step3.pack(side="bottom", fill="x", **pad)
+        plan_bar = ttk.Frame(step3)
+        plan_bar.pack(fill="x", padx=10, pady=(8, 2))
+        self.assign_button = ttk.Button(plan_bar, text="Assign selected  \u2794", command=self.assign_selected)
+        self.assign_button.pack(side="left")
+        self.auto_button = ttk.Button(plan_bar, text="Assign the rest in order", command=self.assign_in_order)
+        self.auto_button.pack(side="left", padx=(6, 0))
+        self.clear_plan_button = ttk.Button(plan_bar, text="Clear plan", command=self.clear_plan)
+        self.clear_plan_button.pack(side="right")
+        self.unassign_button = ttk.Button(plan_bar, text="Remove from plan", command=self.unassign_selected)
+        self.unassign_button.pack(side="right", padx=(0, 6))
+        ttk.Label(
+            step3, foreground="grey", justify="left",
+            text="Select a mission and a slot, then Assign. Or let \u201cAssign the rest in order\u201d "
+                 "pair the remaining missions with the remaining slots, top to bottom.",
+        ).pack(anchor="w", padx=12)
+        self.plan = ttk.Treeview(step3, columns=("mission", "slot", "result"), show="headings",
+                                 height=4, selectmode="extended")
+        self.plan.heading("mission", text="Mission")
+        self.plan.heading("slot", text="\u2794  Slot")
+        self.plan.heading("result", text="Result")
+        self.plan.column("mission", width=300)
+        self.plan.column("slot", width=90, stretch=False)
+        self.plan.column("result", width=260)
+        self.plan.pack(fill="x", padx=10, pady=(2, 8))
+        self.plan.bind("<<TreeviewSelect>>", lambda _e: self._refresh_buttons())
+
+        # Steps 1 and 2, side by side
+        lists = ttk.Frame(outer)
+        lists.pack(fill="both", expand=True, **pad)
+        lists.columnconfigure(0, weight=1, uniform="lists")
+        lists.columnconfigure(1, weight=1, uniform="lists")
+        lists.rowconfigure(0, weight=1)
+
+        step1 = ttk.LabelFrame(lists, text="1.  Missions to send")
+        step1.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        bar1 = ttk.Frame(step1)
+        bar1.pack(fill="x", padx=10, pady=(8, 2))
+        # Two ways in, because missions arrive two ways: one-off downloads
+        # (pick the files) and a folder the planner has been saving into all
+        # session (add the whole folder at once).
+        ttk.Button(bar1, text="Add missions...", command=self.add_missions).pack(side="left")
+        ttk.Button(bar1, text="Add a folder...", command=self.add_folder).pack(side="left", padx=(6, 0))
+        self.remove_button = ttk.Button(bar1, text="Remove", command=self.remove_missions)
+        self.remove_button.pack(side="right")
+        ttk.Label(
+            step1, foreground="grey", justify="left",
+            text="Keep each mission's .jpg next to its .kmz - it becomes\n"
+                 "the mission's picture in the slot on the controller.",
+        ).pack(anchor="w", padx=12, pady=(0, 6))
+        self.missions_tree = self._thumbnail_tree(step1, "Mission", MISSION_NAME_COLUMN_WIDTH)
 
         # Step 2 - the controller
-        step2 = ttk.LabelFrame(outer, text="2.  Mission slot on the controller")
-        step2.pack(fill="both", expand=True, **pad)
-
+        step2 = ttk.LabelFrame(lists, text="2.  Mission slots on the controller")
+        step2.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         bar = ttk.Frame(step2)
         bar.pack(fill="x", padx=10, pady=(8, 2))
         self.scan_button = ttk.Button(bar, text="Scan controller", command=self.scan)
@@ -159,8 +213,8 @@ class TransferApp:
         # shares the device between programs, so it needs no such warning.
         if sys.platform == "darwin":
             before_scanning = (
-                "Before scanning: quit Preview, Photos, and Image Capture. macOS lets only\n"
-                "one program talk to the controller, and these grab it automatically.\n"
+                "Before scanning: quit Preview, Photos, and Image Capture.\n"
+                "macOS lets only one program talk to the controller.\n"
             )
         else:
             before_scanning = "Before scanning: plug in the controller and switch it on.\n"
@@ -169,30 +223,35 @@ class TransferApp:
             text=before_scanning + "Controller Support: RC 2. RC does not work. RC Pro untested.",
             foreground="grey", justify="left",
         ).pack(anchor="w", padx=12, pady=(0, 6))
+        self.tree = self._thumbnail_tree(step2, "Slot", SLOT_COLUMN_WIDTH)
+        self._refresh_buttons()
 
+    def _thumbnail_tree(self, parent, heading, name_width):
+        """A scrolling list with a preview picture and a name on each row."""
         # Row height has to be set on the style, not the widget, or the
         # thumbnails are clipped to the default single-line height.
         style = ttk.Style()
         style.configure("Nests.Treeview", rowheight=THUMB_HEIGHT + 8)
 
-        holder = ttk.Frame(step2)
+        holder = ttk.Frame(parent)
         holder.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         # A small natural height, in rows. The list expands to fill whatever
         # the window has anyway; left at Tk's default of 10 thumbnail-height
         # rows it asks for ~1400px, more than a laptop screen has, and the
         # window opens with the Transfer button pushed off the bottom.
-        self.tree = ttk.Treeview(
-            holder, style="Nests.Treeview", columns=("slot",), height=2,
+        tree = ttk.Treeview(
+            holder, style="Nests.Treeview", columns=("name",), height=2,
             show="tree headings", selectmode="browse",
         )
-        self.tree.heading("slot", text="Slot")
-        self.tree.column("#0", width=THUMB_COLUMN_WIDTH, stretch=False)
-        self.tree.column("slot", anchor="w", width=SLOT_COLUMN_WIDTH)
-        scroll = ttk.Scrollbar(holder, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
+        tree.heading("name", text=heading)
+        tree.column("#0", width=THUMB_COLUMN_WIDTH, stretch=False)
+        tree.column("name", anchor="w", width=name_width)
+        scroll = ttk.Scrollbar(holder, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._refresh_transfer_button())
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._refresh_buttons())
+        return tree
 
     def _fit_to_screen(self):
         """
@@ -579,62 +638,128 @@ class TransferApp:
         self.scan_button.state([state])
         if status:
             self._set_status(status)
-        self._refresh_transfer_button()
+        self._refresh_buttons()
 
-    def _refresh_transfer_button(self):
-        ready = bool(self.kmz_path) and bool(self.tree.selection()) and not self.busy
-        self.transfer_button.state(["!disabled" if ready else "disabled"])
+    def _pending_plan(self):
+        """Plan rows still to send, in order - not the ones already sent."""
+        return [iid for iid in self.plan.get_children() if iid not in self.plan_done]
+
+    def _refresh_buttons(self):
+        idle = not self.busy
+
+        def enable(button, ready):
+            button.state(["!disabled" if ready and idle else "disabled"])
+
+        enable(self.assign_button, bool(self.missions_tree.selection()) and bool(self.tree.selection()))
+        enable(self.auto_button, bool(self.missions_tree.get_children()) and bool(self.tree.get_children()))
+        enable(self.unassign_button, bool(self.plan.selection()))
+        enable(self.clear_plan_button, bool(self.plan.get_children()))
+        enable(self.remove_button, bool(self.missions_tree.selection()))
+        pending = len(self._pending_plan())
+        enable(self.transfer_button, pending > 0)
+        self.transfer_button.configure(
+            text="Transfer to controller" if pending < 2 else f"Transfer {pending} missions to controller")
 
     # ------------------------------------------------------------ actions
 
-    def choose_file(self):
-        path = filedialog.askopenfilename(
-            title="Choose a mission",
+    def add_missions(self):
+        paths = filedialog.askopenfilenames(
+            title="Choose missions",
             filetypes=[("DJI mission", "*.kmz"), ("All files", "*.*")],
         )
-        if not path:
-            return
-        self._set_mission(path)
+        if paths:
+            self._add_mission_paths(paths)
 
-    def choose_folder(self):
+    def add_folder(self):
         folder = filedialog.askdirectory(title="Choose a folder of missions")
         if not folder:
             return
         try:
-            missions = sorted(
-                name for name in os.listdir(folder) if name.lower().endswith(".kmz")
-            )
+            names = sorted(name for name in os.listdir(folder) if name.lower().endswith(".kmz"))
         except OSError as exc:
             messagebox.showerror(WINDOW_TITLE, f"Could not read that folder:\n\n{exc}")
             return
-
-        self.folder = folder
-        self.folder_label.configure(text=folder, foreground="black")
-        self.folder_pick.configure(values=missions)
-        self.folder_pick.set("")
-        if not missions:
-            # Leave any already-chosen mission alone - an empty folder is a
-            # wrong turn, not an instruction to forget the current file.
-            self.folder_pick.configure(state="disabled")
-            messagebox.showwarning(
-                WINDOW_TITLE, f"No .kmz missions in that folder:\n\n{folder}",
-            )
+        if not names:
+            messagebox.showwarning(WINDOW_TITLE, f"No .kmz missions in that folder:\n\n{folder}")
             return
-        self.folder_pick.configure(state="readonly")
-        self._set_status(f"{len(missions)} mission(s) in that folder - pick one.")
+        self._add_mission_paths([os.path.join(folder, name) for name in names])
 
-    def _folder_file_chosen(self, _event=None):
-        name = self.folder_pick.get()
-        if not name or not self.folder:
-            return
-        self._set_mission(os.path.join(self.folder, name))
+    def _add_mission_paths(self, paths):
+        added = 0
+        for path in paths:
+            path = os.path.abspath(path)
+            if path in self.missions:
+                continue          # already listed (or already in the plan)
+            name = os.path.basename(path)
+            image = self._load_image(core.kmz_companion_path(path))
+            if image is not None:
+                self._thumbnails.append(image)
+            label = name if image is not None else f"{name}\n(no preview picture)"
+            self.missions[path] = name
+            self.missions_tree.insert("", "end", iid=path, image=image or "", values=(label,))
+            added += 1
+        self._set_status(f"Added {added} mission(s)." if added else "Those missions are already listed.")
+        self._refresh_buttons()
 
-    def _set_mission(self, path):
-        self.kmz_path = path
-        self.file_label.configure(text=os.path.basename(path), foreground="black")
-        self._refresh_transfer_button()
+    def remove_missions(self):
+        for path in self.missions_tree.selection():
+            self.missions_tree.delete(path)
+            self.missions.pop(path, None)
+        self._refresh_buttons()
+
+    def assign_selected(self):
+        missions, slots = self.missions_tree.selection(), self.tree.selection()
+        if missions and slots:
+            self._assign(missions[0], slots[0])
+            self._refresh_buttons()
+
+    def assign_in_order(self):
+        pairs = list(zip(self.missions_tree.get_children(), self.tree.get_children()))
+        for path, uuid in pairs:
+            self._assign(path, uuid)
+        self._set_status(f"Assigned {len(pairs)} mission(s) in order. Check the plan, then transfer.")
+        self._refresh_buttons()
+
+    def _assign(self, path, uuid):
+        self._plan_counter += 1
+        iid = f"plan{self._plan_counter}"
+        self.plan_items[iid] = (path, uuid)
+        self.plan.insert("", "end", iid=iid,
+                         values=(self.missions[path], f"Slot {self.slot_numbers.get(uuid, '?')}", ""))
+        # Out of their lists while planned, so neither can be picked twice.
+        self.missions_tree.detach(path)
+        self.tree.detach(uuid)
+
+    def unassign_selected(self):
+        for iid in self.plan.selection():
+            self._unassign(iid)
+        self._refresh_buttons()
+
+    def clear_plan(self):
+        for iid in self.plan.get_children():
+            self._unassign(iid)
+        self._set_status("Plan cleared.")
+        self._refresh_buttons()
+
+    def _unassign(self, iid):
+        path, uuid = self.plan_items.pop(iid)
+        self.plan_done.discard(iid)
+        self.plan.delete(iid)
+        # Back into their lists, in their original order.
+        if self.missions_tree.exists(path):
+            order = list(self.missions)
+            self.missions_tree.move(path, "", sum(
+                1 for p in self.missions_tree.get_children() if order.index(p) < order.index(path)))
+        if self.tree.exists(uuid):
+            number = self.slot_numbers.get(uuid, 0)
+            self.tree.move(uuid, "", sum(
+                1 for u in self.tree.get_children() if self.slot_numbers.get(u, 0) < number))
 
     def scan(self):
+        # The plan names slots from the previous scan, which may no longer
+        # be the same - so a new scan starts a new plan.
+        for iid in self.plan.get_children():
+            self._unassign(iid)
         self._clear_nests()
         self._set_busy(True, "Scanning controller - this takes a few seconds...")
         self._run_bg(
@@ -645,24 +770,44 @@ class TransferApp:
         )
 
     def transfer(self):
-        uuid = self._selected_uuid()
-        if not uuid or not self.kmz_path:
+        pending = self._pending_plan()
+        if not pending:
             return
-        # The push purges the slot before writing, so it is genuinely
-        # destructive to whatever mission is sitting there - worth one
-        # confirmation rather than an undo that doesn't exist.
+        pairs = [(iid, *self.plan_items[iid]) for iid in pending]
+        lines = [f"  {self.missions[path]}  \u2794  Slot {self.slot_numbers.get(uuid, '?')}"
+                 for _iid, path, uuid in pairs]
+        if len(lines) > 12:
+            lines = lines[:12] + [f"  ...and {len(lines) - 12} more"]
+        # Each push replaces whatever is in its slot, so it is worth one
+        # confirmation of the whole plan rather than an undo that doesn't exist.
         if not messagebox.askyesno(
             WINDOW_TITLE,
-            f"Replace the mission in this slot with:\n\n{os.path.basename(self.kmz_path)}\n\n"
-            "Whatever is in the slot now will be overwritten.",
+            f"Send {len(pairs)} mission(s) to the controller?\n\n" + "\n".join(lines)
+            + "\n\nWhatever is in those slots now will be overwritten.",
         ):
             return
-        # Captured now: the mission or slot picked in the window may change
-        # while the push runs, and the result belongs to these two.
-        kmz_path = self.kmz_path
+        for iid, _path, _uuid in pairs:
+            self.plan.set(iid, "result", "Waiting...")
+        self.progress.configure(maximum=len(pairs), value=0)
+        self._batch_outcomes = []
         self._set_busy(True, "Transferring - do not unplug the controller...")
-        self._run_bg(lambda: core.push_mission_to_nest(kmz_path, uuid),
-                     lambda result, error: self._transfer_done(result, error, uuid, kmz_path))
+
+        def work():
+            # One at a time, in plan order: the controller holds one MTP
+            # session, and each push already waits for the device to settle.
+            for k, (iid, path, uuid) in enumerate(pairs):
+                self.events.put((functools.partial(self._pair_started, iid, k, len(pairs)), None, None))
+                try:
+                    result, error = core.push_mission_to_nest(path, uuid), None
+                except Exception as exc:  # noqa: BLE001 - reported on that row
+                    core.logger.exception("transfer of %s failed", path)
+                    result, error = None, exc
+                self.events.put((functools.partial(self._pair_done, iid, path, uuid), result, error))
+                if k < len(pairs) - 1:
+                    time.sleep(BATCH_PAUSE_SECONDS)
+            return len(pairs)
+
+        self._run_bg(work, self._batch_done)
 
     # ------------------------------------------------- background plumbing
 
@@ -714,41 +859,76 @@ class TransferApp:
 
         self.nests = nests
         self._populate_nests(nests)
-        self._set_status(f"Found {len(nests)} mission slot(s). Choose one, then transfer.")
+        self._set_status(f"Found {len(nests)} mission slot(s). Assign missions to them, then transfer.")
 
-    def _transfer_done(self, result, error, uuid, kmz_path):
-        self._set_busy(False)
+    def _pair_started(self, iid, k, total, _result, _error):
+        path, _uuid = self.plan_items[iid]
+        self.plan.set(iid, "result", "Sending...")
+        self._set_status(f"Transferring {k + 1} of {total}: {self.missions[path]} - do not unplug the controller...")
+
+    def _pair_done(self, iid, path, uuid, result, error):
         # Whatever happened, the picture this window showed for the slot may
         # no longer be what the controller holds - see _refresh_slot_preview.
-        self._refresh_slot_preview(uuid, kmz_path, result)
+        self._refresh_slot_preview(uuid, path, result)
         if error is not None:
-            self._set_status(f"Transfer failed: {error}", error=True)
-            messagebox.showerror(WINDOW_TITLE, f"Transfer failed:\n\n{error}")
-            return
-
-        ok, message = result
-        find_it = ("Open DJI Fly on the controller to find it in the mission list. If it "
-                   "doesn't appear straight away, back out of the mission list and open it again.")
-        if ok and result.warnings:
+            outcome, text = "failed", f"\u2717 Failed: {error}"
+        elif result[0] and result.warnings:
             # The mission is on the controller, but not cleanly - most often
             # its preview picture didn't copy, which is exactly the slot that
-            # gets mistaken for another next time. Said loudly, not as success.
-            self._set_status("Mission sent, with a problem - see the message.", error=True)
-            messagebox.showwarning(WINDOW_TITLE, f"{message}\n\n{find_it}")
-        elif ok:
-            self._set_status("Transfer complete.")
-            messagebox.showinfo(WINDOW_TITLE, f"Mission transferred.\n\n{find_it}")
+            # gets mistaken for another next time. Said, not counted as clean.
+            outcome, text = "warning", "\u26a0 Sent - " + "; ".join(result.warnings)
+        elif result[0]:
+            outcome, text = "sent", "\u2713 Sent"
         else:
-            self._set_status(f"Transfer failed: {message}", error=True)
-            messagebox.showerror(WINDOW_TITLE, f"Transfer failed:\n\n{message}")
+            outcome, text = "failed", f"\u2717 Failed: {result[1]}"
+        if outcome != "failed":
+            self.plan_done.add(iid)
+        self.plan.set(iid, "result", text)
+        self._batch_outcomes.append((outcome, self.missions[path], self.slot_numbers.get(uuid, "?"),
+                                     text if outcome != "sent" else ""))
+        self.progress.step(1)
+
+    def _batch_done(self, result, error):
+        self._set_busy(False)
+        outcomes = self._batch_outcomes
+        if error is not None:
+            self._set_status(f"Transfer stopped: {error}", error=True)
+            messagebox.showerror(WINDOW_TITLE, f"Transfer stopped:\n\n{error}")
+            return
+        sent = [o for o in outcomes if o[0] != "failed"]
+        failed = [o for o in outcomes if o[0] == "failed"]
+        lines = [f"  {name}  \u2794  Slot {slot}" + (f"\n      {note}" if note else "")
+                 for _o, name, slot, note in sent]
+        message = f"Sent {len(sent)} of {len(outcomes)} mission(s).\n\n" + "\n".join(lines)
+        if failed:
+            message += "\n\nNot sent:\n" + "\n".join(
+                f"  {name}  \u2794  Slot {slot}\n      {note}" for _o, name, slot, note in failed)
+        if sent:
+            # DJI Fly caches each mission's picture privately and won't pick up
+            # a new one on its own; opening the mission and saving it once is
+            # the only thing found to refresh it - so list exactly what to open.
+            message += ("\n\nOn the controller: open each of these missions in DJI Fly and press "
+                        "save, so its picture updates. If one doesn't appear straight away, back out "
+                        "of the mission list and open it again.")
+        self._set_status(f"Sent {len(sent)} of {len(outcomes)}."
+                         + (f" {len(failed)} failed - see the plan." if failed else ""),
+                         error=bool(failed))
+        if failed or any(o[0] == "warning" for o in outcomes):
+            messagebox.showwarning(WINDOW_TITLE, message)
+        else:
+            messagebox.showinfo(WINDOW_TITLE, message)
 
     # -------------------------------------------------------- nest list
 
     def _clear_nests(self):
+        # Including any detached into the plan, which get_children() skips.
+        for uuid in list(self.nests):
+            if self.tree.exists(uuid):
+                self.tree.delete(uuid)
         self.tree.delete(*self.tree.get_children())
-        self._thumbnails.clear()
         self.nests = {}
-        self._refresh_transfer_button()
+        self.slot_numbers = {}
+        self._refresh_buttons()
 
     def _populate_nests(self, nests):
         # The preview is what actually tells someone which mission they are
@@ -757,6 +937,7 @@ class TransferApp:
         # identical-looking across slots at a glance. The UUID is still the
         # row's iid, so it is what gets passed to the transfer.
         for number, uuid in enumerate(sorted(nests), start=1):
+            self.slot_numbers[uuid] = number
             image = self._load_thumbnail(uuid)
             if image is None:
                 label = f"Slot {number}   (no preview available)"
@@ -766,7 +947,10 @@ class TransferApp:
             self.tree.insert("", "end", iid=uuid, image=image or "", values=(label,))
 
     def _load_thumbnail(self, uuid):
-        path = os.path.join(CACHE_DIR, f"{uuid}.jpg")
+        return self._load_image(os.path.join(CACHE_DIR, f"{uuid}.jpg"))
+
+    def _load_image(self, path):
+        """A list-row preview from a .jpg, or None if there isn't a usable one."""
         if not os.path.exists(path):
             return None
         try:
@@ -776,7 +960,7 @@ class TransferApp:
                 img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))))
                 return ImageTk.PhotoImage(img)
         except Exception:
-            core.logger.exception("could not load preview for %s", uuid)
+            core.logger.exception("could not load preview %s", path)
             return None
 
     def _refresh_slot_preview(self, uuid, kmz_path, result):
@@ -802,7 +986,7 @@ class TransferApp:
             core.logger.exception("could not update the cached preview for %s", uuid)
         if not self.tree.exists(uuid):
             return
-        number = self.tree.index(uuid) + 1
+        number = self.slot_numbers.get(uuid, "?")
         image = self._load_thumbnail(uuid)
         if image is not None:
             self._thumbnails.append(image)
@@ -810,10 +994,6 @@ class TransferApp:
         else:
             label = f"Slot {number}   (scan again to see its picture)"
         self.tree.item(uuid, image=image or "", values=(label,))
-
-    def _selected_uuid(self):
-        selection = self.tree.selection()
-        return selection[0] if selection else None
 
 
 def main():

@@ -280,14 +280,18 @@ The app checks for these when a scan fails and names whichever one is running.
 
 #### 3. Transfer
 Keep each mission's `.jpg` preview next to its `.kmz`. The app puts it on the controller as that mission's thumbnail.
-Press **Choose .kmz...** for a single mission, or **Choose folder...** to pick from a folder you have been saving missions into.
-Then press **Scan controller**, choose a slot, and press **Transfer to controller**.
+You can send one mission or several at once:
+1. Under **Missions to send**, press **Add missions...** to pick one or more `.kmz` files, or **Add a folder...** to add every mission in a folder you have been saving into.
+2. Under **Mission slots on the controller**, press **Scan controller**.
+3. Build the **Transfer plan**: select a mission and a slot and press **Assign selected ➔**, or press **Assign the rest in order** to pair the remaining missions with the remaining slots, top to bottom. A mission or slot in the plan leaves its list, so nothing goes in twice. **Remove from plan** and **Clear plan** undo assignments.
+4. Press **Transfer to controller** and confirm. The missions are sent one at a time, and each row of the plan shows ✓ Sent, ⚠ Sent with a problem (usually the preview picture), or ✗ Failed. 
+If a mission fails, the slot's old files are put back, and pressing Transfer again retries only the ones that failed.
 
 Each slot is listed with a preview picture of the mission currently sitting in it.
 Due to the restricted nature of the controller software, the names of the controller missions appear as long strings of numbers and letters (or just the date the mission was created on the controller side), so that picture is the only practical way to tell which mission is which - both when choosing what to overwrite and afterwards on the controller itself.
 
-Once it's done, open the mission list in DJI Fly.
-If the new mission isn't there straight away, back out of the list and open it again.
+Once it's done, the app lists which mission went into which slot.
+Open the mission list in DJI Fly; if a new mission isn't there straight away, back out of the list and open it again.
 
 #### Accessing Missions
 Viewing downloaded missions on the controller is a little different depending on if you are connected to a drone. 
