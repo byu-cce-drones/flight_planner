@@ -72,8 +72,11 @@ BLOCKS = [
     ("span", ("# MTP BRIDGE (direct libmtp bindings", "get_mtp_session_class")),
     ("def", "kill_macos_hijackers"),
     ("span", ("# The path, as a chain of folder names", "UUID_RE")),
+    ("def", "_matches_uuid"),
+    ("def", "_is_preview_of"),
     ("def", "kmz_companion_path"),
     ("def", "fetch_controller_nests_and_previews"),
+    ("def", "PushResult"),
     ("def", "push_mission_to_nest"),
     # Photo sorter. Streamlit-free since the progress reporting moved to
     # callbacks, which is what lets them be copied rather than rewritten.

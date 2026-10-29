@@ -679,14 +679,17 @@ class TransferApp:
             return
 
         ok, message = result
-        if ok:
+        find_it = ("Open DJI Fly on the controller to find it in the mission list. If it "
+                   "doesn't appear straight away, back out of the mission list and open it again.")
+        if ok and result.warnings:
+            # The mission is on the controller, but not cleanly - most often
+            # its preview picture didn't copy, which is exactly the slot that
+            # gets mistaken for another next time. Said loudly, not as success.
+            self._set_status("Mission sent, with a problem - see the message.", error=True)
+            messagebox.showwarning(WINDOW_TITLE, f"{message}\n\n{find_it}")
+        elif ok:
             self._set_status("Transfer complete.")
-            messagebox.showinfo(
-                WINDOW_TITLE,
-                "Mission transferred.\n\nOpen DJI Fly on the controller to find it in "
-                "the mission list. If it doesn't appear straight away, back out of "
-                "the mission list and open it again.",
-            )
+            messagebox.showinfo(WINDOW_TITLE, f"Mission transferred.\n\n{find_it}")
         else:
             self._set_status(f"Transfer failed: {message}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Transfer failed:\n\n{message}")
