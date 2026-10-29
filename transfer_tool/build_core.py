@@ -75,6 +75,7 @@ BLOCKS = [
     ("def", "_matches_uuid"),
     ("def", "_is_preview_of"),
     ("def", "kmz_companion_path"),
+    ("def", "_drop_stale_previews"),
     ("def", "fetch_controller_nests_and_previews"),
     ("def", "PushResult"),
     ("def", "push_mission_to_nest"),

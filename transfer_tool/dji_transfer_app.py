@@ -21,6 +21,7 @@ nothing but the main thread ever touches a widget.
 import datetime
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -616,8 +617,12 @@ class TransferApp:
             "Whatever is in the slot now will be overwritten.",
         ):
             return
+        # Captured now: the mission or slot picked in the window may change
+        # while the push runs, and the result belongs to these two.
+        kmz_path = self.kmz_path
         self._set_busy(True, "Transferring - do not unplug the controller...")
-        self._run_bg(lambda: core.push_mission_to_nest(self.kmz_path, uuid), self._transfer_done)
+        self._run_bg(lambda: core.push_mission_to_nest(kmz_path, uuid),
+                     lambda result, error: self._transfer_done(result, error, uuid, kmz_path))
 
     # ------------------------------------------------- background plumbing
 
@@ -671,8 +676,11 @@ class TransferApp:
         self._populate_nests(nests)
         self._set_status(f"Found {len(nests)} mission slot(s). Choose one, then transfer.")
 
-    def _transfer_done(self, result, error):
+    def _transfer_done(self, result, error, uuid, kmz_path):
         self._set_busy(False)
+        # Whatever happened, the picture this window showed for the slot may
+        # no longer be what the controller holds - see _refresh_slot_preview.
+        self._refresh_slot_preview(uuid, kmz_path, result)
         if error is not None:
             self._set_status(f"Transfer failed: {error}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Transfer failed:\n\n{error}")
@@ -732,6 +740,38 @@ class TransferApp:
         except Exception:
             core.logger.exception("could not load preview for %s", uuid)
             return None
+
+    def _refresh_slot_preview(self, uuid, kmz_path, result):
+        """
+        Bring one slot's row up to date after a transfer, without a full rescan.
+
+        The cached picture is what people choose a slot by, so after a push it
+        must not go on showing the mission that was just replaced. When the
+        new picture reached the controller, the cache gets exactly the file
+        that was sent; otherwise the slot's state isn't known from here, so
+        its picture is cleared and the row says to scan again, rather than
+        guess.
+        """
+        cached = os.path.join(CACHE_DIR, f"{uuid}.jpg")
+        sent = bool(result) and result[0] and getattr(result, "preview_sent", False)
+        try:
+            source = core.kmz_companion_path(kmz_path)
+            if sent and os.path.exists(source):
+                shutil.copyfile(source, cached)
+            elif os.path.exists(cached):
+                os.remove(cached)
+        except OSError:
+            core.logger.exception("could not update the cached preview for %s", uuid)
+        if not self.tree.exists(uuid):
+            return
+        number = self.tree.index(uuid) + 1
+        image = self._load_thumbnail(uuid)
+        if image is not None:
+            self._thumbnails.append(image)
+            label = f"Slot {number}"
+        else:
+            label = f"Slot {number}   (scan again to see its picture)"
+        self.tree.item(uuid, image=image or "", values=(label,))
 
     def _selected_uuid(self):
         selection = self.tree.selection()
