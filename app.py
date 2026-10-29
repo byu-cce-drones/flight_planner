@@ -7509,8 +7509,9 @@ elif page == 'DJI Fly Transfer & Photo Sorter':
         st.subheader("3. Sort the photos afterwards")
         st.markdown(
             "The app's **Sort photos** tab splits an outing's card into one folder per "
-            "flight, using the gaps between shots - so keep **30 seconds** between "
-            "flights or two of them land in the same folder.\n\n"
+            "flight, using the gaps between shots. It starts a new flight after "
+            "**20 seconds** with no photo, so keep **30 seconds** between flights or "
+            "two of them land in the same folder.\n\n"
             "Point it at the folder your photos are in, say where the new folders should "
             "go and which date you flew, then press **Find flights** to see what it will "
             "create before anything is copied. Your originals are copied, never moved."
