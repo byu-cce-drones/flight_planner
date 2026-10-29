@@ -69,6 +69,7 @@ class TransferApp:
         self.sorter_output = None
         self.groups = []
         self.group_names = []
+        self.skipped = {}
         self.sorter_busy = False
         self.nests = {}
         self.events = queue.Queue()
@@ -266,9 +267,11 @@ class TransferApp:
 
         gap_row = ttk.Frame(settings)
         gap_row.pack(fill="x", padx=10, pady=(2, 8))
-        ttk.Label(gap_row, text="New flight after a gap of (minutes)").pack(side="left")
-        self.sorter_gap = ttk.Spinbox(gap_row, from_=1, to=120, width=6)
-        self.sorter_gap.set("5")
+        # Seconds: see core.SORTER_DEFAULT_GAP_SECONDS for why 20.
+        ttk.Label(gap_row, text="New flight after a gap of (seconds)").pack(side="left")
+        self.sorter_gap = ttk.Spinbox(
+            gap_row, from_=core.SORTER_MIN_GAP_SECONDS, to=600, width=6)
+        self.sorter_gap.set(str(core.SORTER_DEFAULT_GAP_SECONDS))
         self.sorter_gap.pack(side="right")
 
         # Bottom-anchored before the list, for the same reason the transfer
@@ -284,7 +287,10 @@ class TransferApp:
         groups_frame.pack(fill="both", expand=True, **pad)
         groups_bar = ttk.Frame(groups_frame)
         groups_bar.pack(fill="x", padx=10, pady=(8, 4))
-        ttk.Button(groups_bar, text="Find flights", command=self.find_groups).pack(side="left")
+        # Kept so it can be disabled during a scan: a second click used to
+        # start a second scan, and both filled the list - every flight twice.
+        self.find_button = ttk.Button(groups_bar, text="Find flights", command=self.find_groups)
+        self.find_button.pack(side="left")
         # Naming the folders before sorting is part of how these get flown -
         # the checklist tells people to note the order they flew missions in,
         # precisely so the folders can be named after them here.
@@ -337,6 +343,8 @@ class TransferApp:
             return None
 
     def find_groups(self):
+        if self.sorter_busy:
+            return
         if not self.sorter_source:
             messagebox.showinfo(WINDOW_TITLE, "Choose the folder your photos are in first.")
             return
@@ -348,10 +356,19 @@ class TransferApp:
                 "for example 2026-10-06.",
             )
             return
+        # Refused rather than quietly corrected: a gap typed wrong and
+        # silently replaced sorts every flight into the wrong folders.
         try:
-            gap = max(1, int(float(self.sorter_gap.get())))
+            gap = float(self.sorter_gap.get())
         except ValueError:
-            gap = 5
+            gap = None
+        if gap is None or gap < core.SORTER_MIN_GAP_SECONDS:
+            messagebox.showerror(
+                WINDOW_TITLE,
+                f"The gap must be a number of seconds, at least {core.SORTER_MIN_GAP_SECONDS}.\n\n"
+                f"{core.SORTER_DEFAULT_GAP_SECONDS} suits flights flown with 30 seconds between them.",
+            )
+            return
 
         source = self.sorter_source
         self._clear_groups()
@@ -366,10 +383,12 @@ class TransferApp:
             return
         groups, output, names = self.groups, self.sorter_output, list(self.group_names)
         total = sum(len(g) for g in groups)
+        note = core.skipped_photos_note(self.skipped)
         if not messagebox.askyesno(
             WINDOW_TITLE,
             f"Copy {total} photos into {len(groups)} folders under:\n\n{output}\n\n"
-            "The originals stay where they are.",
+            + (f"{note} They won't be copied.\n\n" if note else "")
+            + "The originals stay where they are.",
         ):
             return
         self._set_sorter_busy(True, f"Copying {total} photos - this can take a while...")
@@ -387,11 +406,16 @@ class TransferApp:
             WINDOW_TITLE, "Folder name for this flight:", initialvalue=current, parent=self.root)
         if typed is None:
             return
-        # Same cleaning the planner applies to a typed mission name, so a
-        # folder named here can't be one the OS refuses to create.
-        cleaned = core.sanitize_filename_component(typed)
-        taken = {n for i, n in enumerate(self.group_names) if i != index}
-        if cleaned in taken:
+        # Cleaned so a folder named here can't be one the OS refuses to
+        # create; a name that can't be saved is refused with the reason.
+        cleaned, reason = core.clean_photo_folder_name(typed)
+        if reason:
+            messagebox.showerror(WINDOW_TITLE, reason)
+            return
+        # Ignoring case: Windows and macOS would put "Flight A" and
+        # "flight a" in the same folder.
+        taken = {n.casefold() for i, n in enumerate(self.group_names) if i != index}
+        if cleaned.casefold() in taken:
             messagebox.showerror(
                 WINDOW_TITLE,
                 f"Another flight is already going into a folder called {cleaned!r}.\n\n"
@@ -407,19 +431,25 @@ class TransferApp:
 
     # -------------------------------------------------------- sorter results
 
-    def _groups_found(self, groups, error):
+    def _groups_found(self, result, error):
         self._set_sorter_busy(False)
+        # Cleared here as well as when the scan starts, so whatever happened
+        # in between, the list only ever shows this scan's flights.
+        self._clear_groups()
         if error is not None:
             self._set_sorter_status(f"Could not read that folder: {error}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Could not read that folder:\n\n{error}")
             return
+        groups, self.skipped = result
+        note = core.skipped_photos_note(self.skipped)
         self.groups = groups or []
         if not self.groups:
             self._set_sorter_status("No photos from that date in that folder.", error=True)
             messagebox.showinfo(
                 WINDOW_TITLE,
                 "No photos in that folder were taken on that date.\n\nCheck the date, and "
-                "that you picked the folder the photos are actually in.",
+                "that you picked the folder the photos are actually in."
+                + (f"\n\n{note}" if note else ""),
             )
             return
         self.group_names = [core.default_group_folder_name(i, g) for i, g in enumerate(self.groups)]
@@ -429,21 +459,30 @@ class TransferApp:
             ))
         total = sum(len(g) for g in self.groups)
         self._set_sorter_status(
-            f"{len(self.groups)} flights, {total} photos. Rename any folder you want, "
-            "choose where they go, then sort.")
+            f"{len(self.groups)} flights, {total} photos. "
+            + (f"{note} " if note else "")
+            + "Rename any folder you want, choose where they go, then sort.",
+            error=bool(note))
         self._refresh_sort_button()
         self._refresh_rename_button()
 
-    def _sort_done(self, copied, error):
+    def _sort_done(self, result, error):
         self._set_sorter_busy(False)
         if error is not None:
             self._set_sorter_status(f"Sorting failed: {error}", error=True)
             messagebox.showerror(WINDOW_TITLE, f"Sorting failed:\n\n{error}")
             return
-        self._set_sorter_status(f"Sorted {copied} photos into {len(self.groups)} folders.")
+        extra = ""
+        if result["already_there"]:
+            extra += f"\n\n{result['already_there']} were already there, identical, and were left alone."
+        if result["renamed"]:
+            extra += (f"\n\n{result['renamed']} had the same name as a different photo already "
+                      "in the folder, so they were saved with a number added instead of replacing it.")
+        self._set_sorter_status(f"Sorted {result['copied']} photos into {len(self.groups)} folders.")
         messagebox.showinfo(
             WINDOW_TITLE,
-            f"Sorted {copied} photos into {len(self.groups)} folders in:\n\n{self.sorter_output}\n\n"
+            f"Sorted {result['copied']} photos into {len(self.groups)} folders in:\n\n"
+            f"{self.sorter_output}{extra}\n\n"
             "Name each folder after the mission it came from, then upload it.",
         )
 
@@ -453,6 +492,7 @@ class TransferApp:
         self.groups_tree.delete(*self.groups_tree.get_children())
         self.groups = []
         self.group_names = []
+        self.skipped = {}
         self._refresh_sort_button()
 
     def _set_sorter_status(self, text, error=False):
@@ -462,6 +502,7 @@ class TransferApp:
         self.sorter_busy = busy
         if status:
             self._set_sorter_status(status)
+        self.find_button.state(["disabled" if busy else "!disabled"])
         self._refresh_sort_button()
 
     def _refresh_sort_button(self):

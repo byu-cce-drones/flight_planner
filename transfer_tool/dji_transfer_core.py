@@ -1333,15 +1333,23 @@ def sanitize_filename_component(name):
 
 
 def get_exif_datetime(filepath):
-    """Extracts the exact time the photo was taken from EXIF data."""
+    """
+    When the photo was taken, from its EXIF data, or None.
+
+    Read through Image.getexif() and the Exif sub-IFD rather than the
+    JPEG-only _getexif(): TIFF files have no _getexif, so every .tif failed
+    here and was dropped from the sort. DateTimeOriginal lives in the Exif
+    sub-IFD; DateTimeDigitized and the main DateTime tag are the fallbacks for
+    cameras that only write those.
+    """
     try:
         with Image.open(filepath) as img:
-            exif = img._getexif()
-            if not exif:
-                return None
-            for tag, value in exif.items():
-                if tag == 36867: 
-                    return datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+            exif = img.getexif()
+            sub_ifd = exif.get_ifd(0x8769)              # the Exif sub-IFD
+            for tag, source in ((36867, sub_ifd), (36868, sub_ifd), (36867, exif), (306, exif)):
+                value = source.get(tag)
+                if value:
+                    return datetime.strptime(str(value).strip("\x00 "), "%Y:%m:%d %H:%M:%S")
     except Exception:
         pass
     return None
@@ -1356,45 +1364,89 @@ def default_group_folder_name(index, group):
     return f"Group_{index + 1}_{group_start_datetime}"
 
 
-def find_photo_groups(source_folder, target_date, gap_minutes=5, progress=None):
+SORTER_DEFAULT_GAP_SECONDS = 20
+
+
+SORTER_MIN_GAP_SECONDS = 5
+
+
+SORTER_PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+
+
+SORTER_RAW_EXTENSIONS = {'.dng'}
+
+
+def find_photo_groups(source_folder, target_date, gap_seconds=SORTER_DEFAULT_GAP_SECONDS, progress=None):
     """
     Scans source_folder for images taken on target_date and splits them into
     groups wherever the gap between two sequential photos exceeds
-    gap_minutes. Read-only - nothing is copied or created on disk here, so
+    gap_seconds. Read-only - nothing is copied or created on disk here, so
     this can run on its own as a preview step before the user decides how
     (or whether) to name each group.
 
     `progress`, if given, is called with (done, total, filename) as the scan
     walks the folder - reading EXIF off a few hundred photos takes real time.
-    Raises OSError if source_folder can't be read, and returns [] when nothing
-    in it was taken on target_date; saying so is the caller's job, because
-    this runs under both a Streamlit page and a desktop window.
+    Raises OSError if source_folder can't be read, and ValueError for a gap
+    under SORTER_MIN_GAP_SECONDS.
+
+    Returns (groups, skipped). skipped counts the photos left out and why -
+    {"no_time": n, "other_date": n} - because a photo dropped without a word
+    looks, afterwards, like a photo that was never taken. Saying so is the
+    caller's job, since this runs under both a Streamlit page and a desktop
+    window.
     """
-    valid_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+    if gap_seconds < SORTER_MIN_GAP_SECONDS:
+        raise ValueError(f"The gap between flights must be at least {SORTER_MIN_GAP_SECONDS} seconds.")
 
-    image_data = []
     files = os.listdir(source_folder)
+    total = len(files)
+    done = 0
+    image_data = []
+    skipped = {"no_time": 0, "other_date": 0}
+    times_by_stem = {}
+    raws = []
 
-    for i, filename in enumerate(files):
-        ext = os.path.splitext(filename)[1].lower()
-        if ext in valid_extensions:
-            filepath = os.path.join(source_folder, filename)
-            taken_time = get_exif_datetime(filepath)
+    def keep(filename, taken_time):
+        if taken_time is None:
+            skipped["no_time"] += 1
+        elif taken_time.date() != target_date:
+            skipped["other_date"] += 1
+        else:
+            image_data.append({'path': os.path.join(source_folder, filename),
+                               'name': filename, 'time': taken_time})
 
-            if taken_time and taken_time.date() == target_date:
-                image_data.append({'path': filepath, 'name': filename, 'time': taken_time})
-
+    for filename in files:
+        stem, ext = os.path.splitext(filename)
+        ext = ext.lower()
+        if ext in SORTER_RAW_EXTENSIONS:
+            raws.append(filename)       # after the JPGs, so a partner's time is known
+            continue
+        if ext in SORTER_PHOTO_EXTENSIONS:
+            taken_time = get_exif_datetime(os.path.join(source_folder, filename))
+            if taken_time is not None:
+                times_by_stem[stem.lower()] = taken_time
+            keep(filename, taken_time)
+        done += 1
         if progress:
-            progress(i + 1, len(files), filename)
+            progress(done, total, filename)
+
+    for filename in raws:
+        stem = os.path.splitext(filename)[0].lower()
+        taken_time = times_by_stem.get(stem) or get_exif_datetime(os.path.join(source_folder, filename))
+        keep(filename, taken_time)
+        done += 1
+        if progress:
+            progress(done, total, filename)
 
     if not image_data:
-        return []
+        return [], skipped
 
-    image_data.sort(key=lambda x: x['time'])
+    # Name breaks ties, so a JPG and its raw - the same time - sit together.
+    image_data.sort(key=lambda x: (x['time'], x['name']))
 
     groups = []
     current_group = [image_data[0]]
-    gap_threshold = timedelta(minutes=gap_minutes)
+    gap_threshold = timedelta(seconds=gap_seconds)
 
     for i in range(1, len(image_data)):
         time_diff = image_data[i]['time'] - image_data[i-1]['time']
@@ -1407,7 +1459,52 @@ def find_photo_groups(source_folder, target_date, gap_minutes=5, progress=None):
     if current_group:
         groups.append(current_group)
 
-    return groups
+    return groups, skipped
+
+
+def skipped_photos_note(skipped):
+    """One sentence on the photos a scan left out, or "" if none were."""
+    parts = []
+    if skipped.get("no_time"):
+        parts.append(f"{skipped['no_time']} had no time recorded")
+    if skipped.get("other_date"):
+        parts.append(f"{skipped['other_date']} were taken on another date")
+    if not parts:
+        return ""
+    total = skipped.get("no_time", 0) + skipped.get("other_date", 0)
+    return f"{total} photo(s) were left out: " + " and ".join(parts) + "."
+
+
+_WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
+                           *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def clean_photo_folder_name(name):
+    """
+    A typed flight-folder name made safe to create on any OS, as
+    (cleaned_name, None) - or (None, reason) when no usable name is left.
+
+    Characters Windows forbids are removed, and trailing dots and spaces
+    stripped (Windows silently drops them, so "Flight 1." and "Flight 1"
+    would land in one folder). Device names like CON and COM1 are refused
+    outright rather than altered, since changing them would surprise.
+    """
+    cleaned = _WINDOWS_ILLEGAL_FILENAME_CHARS_RE.sub('', name or '').strip().rstrip('. ')
+    if not cleaned:
+        return None, ("That name is empty once the characters a folder name can't contain, "
+                      "or end with, are removed.")
+    if cleaned.split('.')[0].strip().upper() in _WINDOWS_RESERVED_NAMES:
+        return None, f"{cleaned!r} is a name Windows reserves for devices, so it can't be a folder name."
+    return cleaned, None
+
+
+def _free_photo_name(folder, name):
+    """A file name not yet used in `folder`: name, then "name (2)", "name (3)"..."""
+    stem, ext = os.path.splitext(name)
+    n = 2
+    while os.path.exists(os.path.join(folder, f"{stem} ({n}){ext}")):
+        n += 1
+    return f"{stem} ({n}){ext}"
 
 
 def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
@@ -1418,15 +1515,26 @@ def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
     that group's default auto-generated name, same as the fully automatic
     path uses for all of them.
 
-    `progress`, if given, is called with (copied, total) after each file.
-    Returns the number of images copied, for the caller to report; copying a
-    full outing moves gigabytes, so neither the count nor the progress is
-    something to leave to a print statement.
+    Never overwrites. Sorting into a folder that already holds a file of the
+    same name used to replace it silently - a re-run is harmless, but two
+    different outings' DJI_0001.JPG are not the same photo. An identical file
+    is left alone; a different one gets the new copy saved beside it under a
+    numbered name.
+
+    `progress`, if given, is called with (done, total) after each file.
+    Returns {"copied": n, "already_there": n, "renamed": n} for the caller to
+    report; copying a full outing moves gigabytes, so neither the count nor
+    the progress is something to leave to a print statement.
     """
+    # Imported here rather than at the top of the file: this function is also
+    # copied into the desktop helper's core, whose header doesn't carry it.
+    import filecmp
+
     os.makedirs(output_folder, exist_ok=True)
 
     total_images = sum(len(g) for g in groups)
-    copied = 0
+    result = {"copied": 0, "already_there": 0, "renamed": 0}
+    done = 0
 
     for i, group in enumerate(groups):
         folder_name = (group_names[i] if group_names else None) or default_group_folder_name(i, group)
@@ -1436,9 +1544,21 @@ def copy_photo_groups(groups, output_folder, group_names=None, progress=None):
 
         for img in group:
             target_path = os.path.join(folder_path, img['name'])
+            if os.path.exists(target_path):
+                # shallow=False compares the bytes - the size check it does
+                # first makes most mismatches cheap.
+                if filecmp.cmp(img['path'], target_path, shallow=False):
+                    result["already_there"] += 1
+                    done += 1
+                    if progress:
+                        progress(done, total_images)
+                    continue
+                target_path = os.path.join(folder_path, _free_photo_name(folder_path, img['name']))
+                result["renamed"] += 1
             shutil.copy2(img['path'], target_path)
-            copied += 1
+            result["copied"] += 1
+            done += 1
             if progress:
-                progress(copied, total_images)
+                progress(done, total_images)
 
-    return copied
+    return result

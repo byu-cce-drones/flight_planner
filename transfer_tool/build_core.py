@@ -85,7 +85,15 @@ BLOCKS = [
     ("def", "sanitize_filename_component"),
     ("def", "get_exif_datetime"),
     ("def", "default_group_folder_name"),
+    ("def", "SORTER_DEFAULT_GAP_SECONDS"),
+    ("def", "SORTER_MIN_GAP_SECONDS"),
+    ("def", "SORTER_PHOTO_EXTENSIONS"),
+    ("def", "SORTER_RAW_EXTENSIONS"),
     ("def", "find_photo_groups"),
+    ("def", "skipped_photos_note"),
+    ("def", "_WINDOWS_RESERVED_NAMES"),
+    ("def", "clean_photo_folder_name"),
+    ("def", "_free_photo_name"),
     ("def", "copy_photo_groups"),
 ]
 
