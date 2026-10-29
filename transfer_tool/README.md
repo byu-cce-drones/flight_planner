@@ -90,7 +90,7 @@ Also worth checking:
 ## For maintainers - building it
 
 ```
-pip install pyinstaller     # build machine only, never a student's
+pip install pyinstaller pillow     # build machine only, never a student's
 python build_core.py        # sync the transfer code out of app.py
 python build_installer.py   # -> dist/
 ```
@@ -168,8 +168,9 @@ Windows cannot use libmtp without replacing the controller's driver with
 WinUSB, which would break DJI Fly's own access to it - hence the separate
 WPD backend, inherited from app.py.
 
-Thumbnails need Pillow. Without it the app still scans and transfers, it just
-lists slots without previews.
+Pillow is required on every platform - for the slot previews, which are how
+a slot gets chosen, and for reading photo times in the sorter. It is bundled
+into the build, and `build_installer.py` refuses to build without it.
 
 ### Signing
 
@@ -188,4 +189,4 @@ python dji_transfer_app.py
 ```
 
 Needs `libmtp` on macOS/Linux (`brew install libmtp`), or `comtypes` on
-Windows. Pillow is optional, for the preview thumbnails.
+Windows, plus Pillow everywhere (`pip install pillow`).

@@ -31,15 +31,11 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import dji_transfer_core as core
 
-# Thumbnails are JPEGs and Tk can't decode those on its own, so previews are
-# a Pillow-shaped luxury rather than a requirement: without it the tool still
-# scans and transfers, it just lists slots by UUID instead of showing what is
-# currently sitting in each one.
-try:
-    from PIL import Image, ImageTk
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+# Pillow is required, not optional. Tk can't decode the JPEG previews on its
+# own, and the previews are what people choose which slot to overwrite by;
+# the photo sorter reads EXIF times with it too. The core already imports it,
+# so a "Pillow is optional" fallback here could never actually run.
+from PIL import Image, ImageTk
 
 # Somewhere disposable and always writable. Not a folder next to the program:
 # a frozen build can sit inside a read-only .app bundle or Program Files.
@@ -183,7 +179,7 @@ class TransferApp:
         # window opens with the Transfer button pushed off the bottom.
         self.tree = ttk.Treeview(
             holder, style="Nests.Treeview", columns=("slot",), height=2,
-            show="tree headings" if PIL_AVAILABLE else "headings", selectmode="browse",
+            show="tree headings", selectmode="browse",
         )
         self.tree.heading("slot", text="Slot")
         self.tree.column("#0", width=THUMB_COLUMN_WIDTH, stretch=False)
@@ -599,7 +595,7 @@ class TransferApp:
         self._set_busy(True, "Scanning controller - this takes a few seconds...")
         self._run_bg(
             lambda: core.fetch_controller_nests_and_previews(
-                cache_dir=CACHE_DIR, pull_thumbnails=PIL_AVAILABLE,
+                cache_dir=CACHE_DIR, pull_thumbnails=True,
             ),
             self._scan_done,
         )
@@ -726,8 +722,6 @@ class TransferApp:
             self.tree.insert("", "end", iid=uuid, image=image or "", values=(label,))
 
     def _load_thumbnail(self, uuid):
-        if not PIL_AVAILABLE:
-            return None
         path = os.path.join(CACHE_DIR, f"{uuid}.jpg")
         if not os.path.exists(path):
             return None

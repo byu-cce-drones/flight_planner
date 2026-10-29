@@ -80,6 +80,15 @@ def preflight():
     except ImportError:
         problems.append("PyInstaller is not installed. Run:  pip install pyinstaller")
 
+    # Required on every platform: the slot previews and the photo sorter's
+    # EXIF times both need it, and the core imports it unconditionally - a
+    # build without it starts, then dies on launch on a student's machine.
+    # ImageTk is checked as well, since it is the half that needs Tk support.
+    try:
+        from PIL import Image, ImageTk  # noqa: F401
+    except ImportError:
+        problems.append("Pillow (with Tk support) is not installed. Run:  pip install pillow")
+
     if not os.path.exists(os.path.join(HERE, "dji_transfer_core.py")):
         problems.append("dji_transfer_core.py is missing. Run:  python build_core.py")
     else:
