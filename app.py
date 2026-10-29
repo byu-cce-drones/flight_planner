@@ -4868,7 +4868,7 @@ def _readme_dialog():
 # Loaded once per session (not re-read on every rerun) so editing the file by
 # hand while the app is running doesn't fight with in-progress edits in the
 # dialog below - same reasoning as the other persisted-to-disk settings in
-# this app (Creator presets, tracker folder path).
+# this app (Creator presets).
 if "pilot_name" not in st.session_state:
     _pilot_info = load_pilot_info()
     st.session_state.pilot_name = _pilot_info.get("name", "")
