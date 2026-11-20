@@ -44,12 +44,25 @@ folder on your computer either.
    retries only the ones that failed.
 6. Open the mission list in DJI Fly. If the mission is not there straight
    away, back out of the list and open it again.
+7. Before flying it, open each mission you sent and use **Save as** - not
+   **Save**. The copy shows the new picture. Delete the original, which
+   still shows the old one; both hold the same mission.
 
 The preview picture next to each slot shows the mission currently in it, so
 you can see what you are about to overwrite.
 
 If the mission went over but its preview picture didn't, the helper says so,
 and the slot shows the new picture after the next scan.
+
+### Why "Save as"
+
+DJI Fly keeps its own copy of every mission's picture and never reloads it -
+not when the mission is opened, and not after a restart - so a mission sent
+into a slot keeps showing the slot's old picture. A plain **Save** doesn't
+help either: DJI Fly draws its own map screenshot over the new picture. Save
+as gives the mission a new id that DJI Fly has no picture for yet, so it
+reads the one the helper sent. Do it before flying: flying a mission saves
+it, which replaces the picture with DJI Fly's screenshot.
 
 If a transfer fails partway, the helper puts the slot's old mission back. If
 it can't, it says where on your computer it saved a copy of the old one.

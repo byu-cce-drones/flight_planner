@@ -8073,8 +8073,11 @@ elif page == 'DJI Fly Transfer & Photo Sorter':
             "to controller**. The preview picture shows the mission currently in each "
             "slot, so you can see what you are about to replace.\n"
             "5. Open the mission list in DJI Fly. If the mission is not there, back out of "
-            "the list and open it again. Load it, back out to the mission history page, "
-            "and press save."
+            "the list and open it again.\n"
+            "6. Before flying it, load each mission you sent and use **Save as** - not "
+            "**Save**. DJI Fly never reloads a mission's picture, and a plain Save "
+            "replaces it with DJI Fly's own map screenshot. The copy shows the new "
+            "picture; delete the original, which still shows the old one."
         )
         st.caption("Controller Support: RC 2. RC does not work. RC Pro untested.")
 

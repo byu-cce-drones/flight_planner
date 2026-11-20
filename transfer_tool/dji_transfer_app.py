@@ -904,12 +904,15 @@ class TransferApp:
             message += "\n\nNot sent:\n" + "\n".join(
                 f"  {name}  \u2794  Slot {slot}\n      {note}" for _o, name, slot, note in failed)
         if sent:
-            # DJI Fly caches each mission's picture privately and won't pick up
-            # a new one on its own; opening the mission and saving it once is
-            # the only thing found to refresh it - so list exactly what to open.
-            message += ("\n\nOn the controller: open each of these missions in DJI Fly and press "
-                        "save, so its picture updates. If one doesn't appear straight away, back out "
-                        "of the mission list and open it again.")
+            # DJI Fly caches each mission's picture privately and never re-reads
+            # it - not after opening the mission, not after a restart. A plain
+            # Save makes it draw its own map screenshot over the new picture.
+            # "Save as" is the one thing found to show it: the copy gets a new
+            # id DJI Fly has no cached picture for, so it reads the file we sent.
+            message += ("\n\nOn the controller, before flying them: open each of these missions in "
+                        "DJI Fly and use Save as (not Save). The copy shows the new picture; delete "
+                        "the original, which still shows the old one. If a mission doesn't appear "
+                        "straight away, back out of the mission list and open it again.")
         self._set_status(f"Sent {len(sent)} of {len(outcomes)}."
                          + (f" {len(failed)} failed - see the plan." if failed else ""),
                          error=bool(failed))
